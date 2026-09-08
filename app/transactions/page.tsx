@@ -24,6 +24,7 @@ import {
   ChevronRight,
   X,
   Pencil,
+  Download,
 } from "lucide-react";
 
 import {
@@ -371,6 +372,53 @@ export default function Transactions() {
     setShowFilters(false);
   }
 
+  function handleExportCSV() {
+    if (filteredTransactions.length === 0) {
+      setErrorMessage("There are no transactions to export.");
+      return;
+    }
+
+    const headers = [
+      "Date",
+      "Type",
+      "Category",
+      "Amount",
+      "Transaction Mode",
+    ];
+
+    const rows = filteredTransactions.map((transaction) => [
+      formatDate(transaction.transaction_date),
+      transaction.type,
+      transaction.category,
+      Number(transaction.amount).toFixed(2),
+      transaction.transaction_mode || "",
+    ]);
+
+    const csvContent = [headers, ...rows]
+      .map((row) =>
+        row
+          .map((value) => `"${String(value).replace(/"/g, '""')}"`)
+          .join(",")
+      )
+      .join("\n");
+
+    const blob = new Blob([csvContent], {
+      type: "text/csv;charset=utf-8;",
+    });
+
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+
+    link.href = url;
+    link.download = `spendx-transactions-${getTodayISODate()}.csv`;
+
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+
+    URL.revokeObjectURL(url);
+  }
+
   useEffect(() => {
     const timeoutId = window.setTimeout(() => {
       void loadTransactions();
@@ -384,7 +432,8 @@ export default function Transactions() {
 
     return transactions
       .filter((transaction) => {
-        const title = transaction.transaction_mode || transaction.category || "";
+        const title =
+          transaction.transaction_mode || transaction.category || "";
         const amountText = String(transaction.amount);
 
         const matchesSearch =
@@ -478,7 +527,9 @@ export default function Transactions() {
             <div className="mb-5 flex items-center justify-between gap-4">
               <div>
                 <h3 className="font-mono text-base font-semibold sx-title">
-                  {editingTransaction ? "Update Transaction" : "Add Transaction"}
+                  {editingTransaction
+                    ? "Update Transaction"
+                    : "Add Transaction"}
                 </h3>
 
                 <p className="mt-1 text-xs sx-muted">
@@ -564,24 +615,12 @@ export default function Transactions() {
                 onChange={(event) => setTransactionMode(event.target.value)}
                 className="sx-field w-full rounded-2xl px-4 py-3 text-sm"
               >
-                <option value="UPI">
-                  UPI
-                </option>
-                <option value="Cash">
-                  Cash
-                </option>
-                <option value="Credit Card">
-                  Credit Card
-                </option>
-                <option value="Debit Card">
-                  Debit Card
-                </option>
-                <option value="Net Banking">
-                  Net Banking
-                </option>
-                <option value="Wallet">
-                  Wallet
-                </option>
+                <option value="UPI">UPI</option>
+                <option value="Cash">Cash</option>
+                <option value="Credit Card">Credit Card</option>
+                <option value="Debit Card">Debit Card</option>
+                <option value="Net Banking">Net Banking</option>
+                <option value="Wallet">Wallet</option>
               </select>
 
               <div className="relative">
@@ -773,6 +812,16 @@ export default function Transactions() {
                 </div>
               )}
             </div>
+
+            <button
+              type="button"
+              onClick={handleExportCSV}
+              disabled={filteredTransactions.length === 0 || loading}
+              className="flex items-center justify-center gap-2 rounded-2xl border border-border bg-card/40 px-5 py-3 text-sm font-semibold sx-muted transition-colors hover:bg-card/60 hover:sx-title disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              <Download size={16} />
+              Export CSV
+            </button>
           </div>
 
           <div className="sx-card overflow-hidden rounded-3xl shadow-2xl">
@@ -846,7 +895,9 @@ export default function Transactions() {
                       <div className="flex items-center justify-between gap-6 sm:justify-end">
                         <div className="sm:text-right">
                           <p
-                            className={`font-mono text-base font-bold ${isIncome ? "text-emerald-500" : "text-red-500"
+                            className={`font-mono text-base font-bold ${isIncome
+                                ? "text-emerald-500"
+                                : "text-red-500"
                               }`}
                           >
                             {isIncome ? "+" : "-"}
