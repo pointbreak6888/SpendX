@@ -35,6 +35,16 @@ import {
   type TransactionInput,
 } from "@/lib/transactions";
 
+import {
+  addRecurringTransaction,
+  deleteRecurringTransaction,
+  getRecurringTransactions,
+  processRecurringTransactions,
+  toggleRecurringTransaction,
+  type RecurringFrequency,
+  type RecurringTransaction,
+} from "@/lib/recurring-transactions";
+
 type Transaction = {
   id: string;
   user_id: string;
@@ -203,6 +213,28 @@ export default function Transactions() {
   const [editingTransaction, setEditingTransaction] =
     useState<Transaction | null>(null);
 
+  const [recurringTransactions, setRecurringTransactions] = useState<
+    RecurringTransaction[]
+  >([]);
+
+  const [showRecurringForm, setShowRecurringForm] = useState(false);
+  const [recurringAmount, setRecurringAmount] = useState("");
+  const [recurringType, setRecurringType] = useState<"income" | "expense">(
+    "expense"
+  );
+  const [recurringCategory, setRecurringCategory] = useState("");
+  const [recurringMode, setRecurringMode] = useState("UPI");
+  const [recurringFrequency, setRecurringFrequency] =
+    useState<RecurringFrequency>("monthly");
+  const [recurringStartDate, setRecurringStartDate] =
+    useState(getTodayISODate());
+  const [recurringEndDate, setRecurringEndDate] = useState("");
+
+  const [savingRecurring, setSavingRecurring] = useState(false);
+  const [deletingRecurringId, setDeletingRecurringId] = useState<string | null>(
+    null
+  );
+
   const calculatedExpensePreview = useMemo(() => {
     if (type !== "expense" || !amount.trim()) {
       return null;
@@ -214,6 +246,24 @@ export default function Transactions() {
       return null;
     }
   }, [amount, type]);
+
+  const loadRecurringTransactions = useCallback(async () => {
+    try {
+      const data = await getRecurringTransactions();
+      setRecurringTransactions(data);
+    } catch (error) {
+      console.error("Load recurring transactions error:", error);
+
+      if (isLoginError(error)) {
+        router.replace("/login");
+        return;
+      }
+
+      if (error instanceof Error) {
+        setErrorMessage(error.message);
+      }
+    }
+  }, [router]);
 
   const loadTransactions = useCallback(async () => {
     try {
@@ -349,6 +399,141 @@ export default function Transactions() {
     }
   }
 
+  async function handleAddRecurringTransaction(
+    event: FormEvent<HTMLFormElement>
+  ) {
+    event.preventDefault();
+
+    const numericAmount = Number(recurringAmount);
+
+    if (!Number.isFinite(numericAmount) || numericAmount <= 0) {
+      setErrorMessage("Enter a valid recurring amount greater than 0.");
+      return;
+    }
+
+    if (!recurringCategory.trim()) {
+      setErrorMessage("Enter a recurring transaction category.");
+      return;
+    }
+
+    if (!recurringStartDate) {
+      setErrorMessage("Select a start date.");
+      return;
+    }
+
+    if (recurringEndDate && recurringEndDate < recurringStartDate) {
+      setErrorMessage("End date cannot be before the start date.");
+      return;
+    }
+
+    try {
+      setSavingRecurring(true);
+      setErrorMessage("");
+
+      await addRecurringTransaction({
+        amount: numericAmount,
+        type: recurringType,
+        category: recurringCategory.trim(),
+        transaction_mode: recurringMode,
+        frequency: recurringFrequency,
+        start_date: recurringStartDate,
+        end_date: recurringEndDate || null,
+      });
+
+      setRecurringAmount("");
+      setRecurringCategory("");
+      setRecurringMode("UPI");
+      setRecurringType("expense");
+      setRecurringFrequency("monthly");
+      setRecurringStartDate(getTodayISODate());
+      setRecurringEndDate("");
+      setShowRecurringForm(false);
+
+      await loadRecurringTransactions();
+    } catch (error) {
+      console.error("Save recurring transaction error:", error);
+
+      if (isLoginError(error)) {
+        router.replace("/login");
+        return;
+      }
+
+      if (error instanceof Error) {
+        setErrorMessage(error.message);
+      } else {
+        setErrorMessage(
+          "Something went wrong while saving the recurring transaction."
+        );
+      }
+    } finally {
+      setSavingRecurring(false);
+    }
+  }
+
+  async function handleDeleteRecurringTransaction(id: string) {
+    try {
+      setDeletingRecurringId(id);
+      setErrorMessage("");
+
+      await deleteRecurringTransaction(id);
+
+      setRecurringTransactions((current) =>
+        current.filter((transaction) => transaction.id !== id)
+      );
+    } catch (error) {
+      console.error("Delete recurring transaction error:", error);
+
+      if (isLoginError(error)) {
+        router.replace("/login");
+        return;
+      }
+
+      if (error instanceof Error) {
+        setErrorMessage(error.message);
+      } else {
+        setErrorMessage(
+          "Something went wrong while deleting the recurring transaction."
+        );
+      }
+    } finally {
+      setDeletingRecurringId(null);
+    }
+  }
+
+  async function handleToggleRecurringTransaction(
+    recurring: RecurringTransaction
+  ) {
+    try {
+      setErrorMessage("");
+
+      const updated = await toggleRecurringTransaction(
+        recurring.id,
+        !recurring.is_active
+      );
+
+      setRecurringTransactions((current) =>
+        current.map((item) =>
+          item.id === updated.id ? updated : item
+        )
+      );
+    } catch (error) {
+      console.error("Toggle recurring transaction error:", error);
+
+      if (isLoginError(error)) {
+        router.replace("/login");
+        return;
+      }
+
+      if (error instanceof Error) {
+        setErrorMessage(error.message);
+      } else {
+        setErrorMessage(
+          "Something went wrong while updating the recurring transaction."
+        );
+      }
+    }
+  }
+
   function handleSelectDate(date: Date) {
     setTransactionDate(toISODate(date));
     setShowCalendar(false);
@@ -421,11 +606,25 @@ export default function Transactions() {
 
   useEffect(() => {
     const timeoutId = window.setTimeout(() => {
-      void loadTransactions();
+      void (async () => {
+        try {
+          await processRecurringTransactions();
+        } catch (error) {
+          console.error(
+            "Process recurring transactions error:",
+            error
+          );
+        }
+
+        await Promise.all([
+          loadTransactions(),
+          loadRecurringTransactions(),
+        ]);
+      })();
     }, 0);
 
     return () => window.clearTimeout(timeoutId);
-  }, [loadTransactions]);
+  }, [loadTransactions, loadRecurringTransactions]);
 
   const filteredTransactions = useMemo(() => {
     const query = searchQuery.toLowerCase().trim();
@@ -522,7 +721,7 @@ export default function Transactions() {
 
           <form
             onSubmit={handleAddTransaction}
-            className="mb-8 sx-card rounded-3xl p-6"
+            className="relative z-50 mb-8 sx-card rounded-3xl p-6"
           >
             <div className="mb-5 flex items-center justify-between gap-4">
               <div>
@@ -548,8 +747,8 @@ export default function Transactions() {
                     setErrorMessage("");
                   }}
                   className={`rounded-xl px-4 py-2 text-xs font-semibold transition-colors ${type === "expense"
-                      ? "bg-red-500/20 text-red-400"
-                      : "sx-muted hover:sx-title"
+                    ? "bg-red-500/20 text-red-400"
+                    : "sx-muted hover:sx-title"
                     }`}
                 >
                   Expense
@@ -563,8 +762,8 @@ export default function Transactions() {
                     setErrorMessage("");
                   }}
                   className={`rounded-xl px-4 py-2 text-xs font-semibold transition-colors ${type === "income"
-                      ? "bg-emerald-500/20 text-emerald-400"
-                      : "sx-muted hover:sx-title"
+                    ? "bg-emerald-500/20 text-emerald-400"
+                    : "sx-muted hover:sx-title"
                     }`}
                 >
                   Income
@@ -689,10 +888,10 @@ export default function Transactions() {
                             type="button"
                             onClick={() => handleSelectDate(date)}
                             className={`flex h-10 flex-col items-center justify-center rounded-xl text-sm transition-colors ${selected
-                                ? "bg-emerald-500 font-bold text-black"
-                                : today
-                                  ? "border border-emerald-500/30 bg-emerald-500/10 text-emerald-400"
-                                  : "sx-muted hover:bg-card/60 hover:sx-title"
+                              ? "bg-emerald-500 font-bold text-black"
+                              : today
+                                ? "border border-emerald-500/30 bg-emerald-500/10 text-emerald-400"
+                                : "sx-muted hover:bg-card/60 hover:sx-title"
                               }`}
                           >
                             <span className="leading-none">
@@ -741,6 +940,272 @@ export default function Transactions() {
             </div>
           </form>
 
+          {/* Recurring Transactions */}
+          <section className="relative z-10 mb-8 sx-card rounded-3xl p-6">
+            <div className="mb-5 flex items-center justify-between gap-4">
+              <div>
+                <h3 className="font-mono text-base font-semibold sx-title">
+                  Recurring Transactions
+                </h3>
+
+                <p className="mt-1 text-xs sx-muted">
+                  Automatically add transactions on a schedule.
+                </p>
+              </div>
+
+              <button
+                type="button"
+                onClick={() => {
+                  setShowRecurringForm((current) => !current);
+                  setErrorMessage("");
+                }}
+                className="rounded-2xl bg-white px-4 py-2 text-xs font-semibold text-black transition-opacity hover:opacity-90"
+              >
+                {showRecurringForm ? "Cancel" : "+ Add Recurring"}
+              </button>
+            </div>
+
+            {showRecurringForm && (
+              <form
+                onSubmit={handleAddRecurringTransaction}
+                className="mb-6 rounded-2xl border border-border bg-card/30 p-5"
+              >
+                <div className="mb-5 flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
+                  <div>
+                    <p className="font-mono text-sm font-semibold sx-title">
+                      New Recurring Transaction
+                    </p>
+
+                    <p className="mt-1 text-xs sx-muted">
+                      This will automatically create normal transactions when
+                      they are due.
+                    </p>
+                  </div>
+
+                  <div className="flex rounded-2xl border border-border bg-card/40 p-1">
+                    <button
+                      type="button"
+                      onClick={() => setRecurringType("expense")}
+                      className={`rounded-xl px-4 py-2 text-xs font-semibold ${recurringType === "expense"
+                        ? "bg-red-500/20 text-red-400"
+                        : "sx-muted"
+                        }`}
+                    >
+                      Expense
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => setRecurringType("income")}
+                      className={`rounded-xl px-4 py-2 text-xs font-semibold ${recurringType === "income"
+                        ? "bg-emerald-500/20 text-emerald-400"
+                        : "sx-muted"
+                        }`}
+                    >
+                      Income
+                    </button>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-4">
+                  <input
+                    type="number"
+                    min="0.01"
+                    step="0.01"
+                    value={recurringAmount}
+                    onChange={(event) =>
+                      setRecurringAmount(event.target.value)
+                    }
+                    placeholder="Amount"
+                    className="sx-field w-full rounded-2xl px-4 py-3 text-sm placeholder:text-muted-foreground"
+                  />
+
+                  <input
+                    type="text"
+                    value={recurringCategory}
+                    onChange={(event) => {
+                      const value = event.target.value;
+
+                      setRecurringCategory(
+                        value.charAt(0).toUpperCase() + value.slice(1)
+                      );
+                    }}
+                    placeholder="Category"
+                    className="sx-field w-full rounded-2xl px-4 py-3 text-sm placeholder:text-muted-foreground"
+                  />
+
+                  <select
+                    value={recurringMode}
+                    onChange={(event) =>
+                      setRecurringMode(event.target.value)
+                    }
+                    className="sx-field w-full rounded-2xl px-4 py-3 text-sm"
+                  >
+                    <option value="UPI">UPI</option>
+                    <option value="Cash">Cash</option>
+                    <option value="Credit Card">Credit Card</option>
+                    <option value="Debit Card">Debit Card</option>
+                    <option value="Net Banking">Net Banking</option>
+                    <option value="Wallet">Wallet</option>
+                  </select>
+
+                  <select
+                    value={recurringFrequency}
+                    onChange={(event) =>
+                      setRecurringFrequency(
+                        event.target.value as RecurringFrequency
+                      )
+                    }
+                    className="sx-field w-full rounded-2xl px-4 py-3 text-sm"
+                  >
+                    <option value="daily">Daily</option>
+                    <option value="weekly">Weekly</option>
+                    <option value="monthly">Monthly</option>
+                    <option value="yearly">Yearly</option>
+                  </select>
+
+                  <div>
+                    <label className="mb-2 block text-xs sx-muted">
+                      Start date
+                    </label>
+
+                    <input
+                      type="date"
+                      value={recurringStartDate}
+                      onChange={(event) =>
+                        setRecurringStartDate(event.target.value)
+                      }
+                      className="sx-field w-full rounded-2xl px-4 py-3 text-sm"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="mb-2 block text-xs sx-muted">
+                      End date
+                    </label>
+
+                    <input
+                      type="date"
+                      value={recurringEndDate}
+                      min={recurringStartDate}
+                      onChange={(event) =>
+                        setRecurringEndDate(event.target.value)
+                      }
+                      className="sx-field w-full rounded-2xl px-4 py-3 text-sm"
+                    />
+                  </div>
+                </div>
+
+                <div className="mt-5 flex justify-end">
+                  <button
+                    type="submit"
+                    disabled={savingRecurring}
+                    className="rounded-2xl bg-white px-6 py-3 text-sm font-semibold text-black transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    {savingRecurring
+                      ? "Saving..."
+                      : "Save Recurring"}
+                  </button>
+                </div>
+              </form>
+            )}
+
+            {recurringTransactions.length === 0 ? (
+              <div className="rounded-2xl border border-border bg-card/20 px-5 py-8 text-center">
+                <p className="text-sm sx-muted">
+                  No recurring transactions yet.
+                </p>
+
+                <p className="mt-1 text-xs sx-muted">
+                  Add one to automatically create transactions on a schedule.
+                </p>
+              </div>
+            ) : (
+              <div className="space-y-3">
+                {recurringTransactions.map((recurring) => (
+                  <div
+                    key={recurring.id}
+                    className="flex flex-col gap-4 rounded-2xl border border-border bg-card/20 p-4 md:flex-row md:items-center md:justify-between"
+                  >
+                    <div className="min-w-0">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <p className="font-semibold sx-title">
+                          {recurring.category || "Recurring Transaction"}
+                        </p>
+
+                        <span
+                          className={`rounded-full px-2 py-1 text-[10px] font-semibold ${recurring.type === "expense"
+                            ? "bg-red-500/10 text-red-400"
+                            : "bg-emerald-500/10 text-emerald-400"
+                            }`}
+                        >
+                          {recurring.type}
+                        </span>
+
+                        <span
+                          className={`rounded-full px-2 py-1 text-[10px] font-semibold ${recurring.is_active
+                            ? "bg-emerald-500/10 text-emerald-400"
+                            : "bg-white/5 sx-muted"
+                            }`}
+                        >
+                          {recurring.is_active ? "Active" : "Paused"}
+                        </span>
+                      </div>
+
+                      <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs sx-muted">
+                        <span>
+                          {formatCurrency(Number(recurring.amount))}
+                        </span>
+
+                        <span>
+                          {recurring.frequency.charAt(0).toUpperCase() +
+                            recurring.frequency.slice(1)}
+                        </span>
+
+                        <span>
+                          Next: {formatDate(recurring.next_occurrence)}
+                        </span>
+
+                        <span>
+                          {recurring.transaction_mode || "UPI"}
+                        </span>
+                      </div>
+                    </div>
+
+                    <div className="flex shrink-0 gap-2">
+                      <button
+                        type="button"
+                        onClick={() =>
+                          handleToggleRecurringTransaction(recurring)
+                        }
+                        className="rounded-xl border border-border px-3 py-2 text-xs font-semibold sx-muted hover:bg-card/40"
+                      >
+                        {recurring.is_active ? "Pause" : "Resume"}
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() =>
+                          handleDeleteRecurringTransaction(recurring.id)
+                        }
+                        disabled={
+                          deletingRecurringId === recurring.id
+                        }
+                        className="rounded-xl border border-red-500/20 bg-red-500/5 px-3 py-2 text-xs font-semibold text-red-400 hover:bg-red-500/10 disabled:opacity-50"
+                      >
+                        {deletingRecurringId === recurring.id
+                          ? "Deleting..."
+                          : "Delete"}
+                      </button>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+          </section>
+
+          <div className="mb-8 flex flex-col gap-4 sm:flex-row"></div>
+
           <div className="mb-8 flex flex-col gap-4 sm:flex-row">
             <div className="relative flex-1">
               <Search
@@ -773,8 +1238,8 @@ export default function Transactions() {
                     type="button"
                     onClick={() => setFilterType("all")}
                     className={`w-full rounded-2xl px-4 py-3 text-left text-sm transition-colors ${filterType === "all"
-                        ? "bg-card/60 sx-title"
-                        : "sx-muted hover:bg-card/40 hover:sx-title"
+                      ? "bg-card/60 sx-title"
+                      : "sx-muted hover:bg-card/40 hover:sx-title"
                       }`}
                   >
                     All transactions
@@ -784,8 +1249,8 @@ export default function Transactions() {
                     type="button"
                     onClick={() => setFilterType("income")}
                     className={`w-full rounded-2xl px-4 py-3 text-left text-sm transition-colors ${filterType === "income"
-                        ? "bg-emerald-500/15 text-emerald-400"
-                        : "sx-muted hover:bg-card/40 hover:sx-title"
+                      ? "bg-emerald-500/15 text-emerald-400"
+                      : "sx-muted hover:bg-card/40 hover:sx-title"
                       }`}
                   >
                     Income only
@@ -795,8 +1260,8 @@ export default function Transactions() {
                     type="button"
                     onClick={() => setFilterType("expense")}
                     className={`w-full rounded-2xl px-4 py-3 text-left text-sm transition-colors ${filterType === "expense"
-                        ? "bg-red-500/15 text-red-400"
-                        : "sx-muted hover:bg-card/40 hover:sx-title"
+                      ? "bg-red-500/15 text-red-400"
+                      : "sx-muted hover:bg-card/40 hover:sx-title"
                       }`}
                   >
                     Expenses only
@@ -861,8 +1326,8 @@ export default function Transactions() {
                       <div className="flex items-center gap-4">
                         <div
                           className={`flex h-12 w-12 items-center justify-center rounded-2xl border text-lg ${isIncome
-                              ? "border-emerald-500/10 bg-emerald-500/10 text-emerald-500"
-                              : "border-red-500/10 bg-red-500/10 text-red-500"
+                            ? "border-emerald-500/10 bg-emerald-500/10 text-emerald-500"
+                            : "border-red-500/10 bg-red-500/10 text-red-500"
                             }`}
                         >
                           {isIncome ? (
@@ -896,8 +1361,8 @@ export default function Transactions() {
                         <div className="sm:text-right">
                           <p
                             className={`font-mono text-base font-bold ${isIncome
-                                ? "text-emerald-500"
-                                : "text-red-500"
+                              ? "text-emerald-500"
+                              : "text-red-500"
                               }`}
                           >
                             {isIncome ? "+" : "-"}
@@ -944,6 +1409,6 @@ export default function Transactions() {
 
         <LiquidGlassNavbar />
       </div>
-    </AuthGuard>
+    </AuthGuard >
   );
 }
