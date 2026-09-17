@@ -3,7 +3,10 @@
 import AuthGuard from "@/components/AuthGuard";
 import LiquidGlassNavbar from "@/components/ui/liquidglassnavbar";
 import TopHeader from "@/components/ui/topheader";
+import { supabase } from "@/lib/supabase";
+
 import { useEffect, useMemo, useState } from "react";
+
 import {
   Activity,
   ArrowDownRight,
@@ -11,7 +14,6 @@ import {
   BarChart3,
   Brain,
   CalendarDays,
-  IndianRupee,
   Loader2,
   PiggyBank,
   ShieldCheck,
@@ -19,8 +21,15 @@ import {
   TrendingUp,
   Wallet,
 } from "lucide-react";
+
 import { getTransactions } from "@/lib/transactions";
 import { motion } from "framer-motion";
+
+import {
+  formatCurrency as formatCurrencyValue,
+} from "@/lib/formatCurrency";
+
+import type { CurrencyCode } from "@/lib/currencies";
 
 type Transaction = {
   id: string;
@@ -50,20 +59,10 @@ type YearlySummary = {
   net: number;
 };
 
-function formatCurrency(value: number) {
-  return new Intl.NumberFormat("en-IN", {
-    style: "currency",
-    currency: "INR",
-    maximumFractionDigits: 2,
-    minimumFractionDigits: 2,
-  }).format(value);
-}
-
 function getMonthKey(date: Date) {
-  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(
-    2,
-    "0"
-  )}`;
+  return `${date.getFullYear()}-${String(
+    date.getMonth() + 1
+  ).padStart(2, "0")}`;
 }
 
 function getMonthLabelFromKey(monthKey: string) {
@@ -77,10 +76,17 @@ function getMonthLabelFromKey(monthKey: string) {
 }
 
 function getDaysInMonth(date: Date) {
-  return new Date(date.getFullYear(), date.getMonth() + 1, 0).getDate();
+  return new Date(
+    date.getFullYear(),
+    date.getMonth() + 1,
+    0
+  ).getDate();
 }
 
-function getFinancialCondition(projectedNet: number, projectedSavingsRate: number) {
+function getFinancialCondition(
+  projectedNet: number,
+  projectedSavingsRate: number
+) {
   if (projectedNet <= 0) {
     return {
       label: "Risky",
@@ -125,11 +131,82 @@ function getFinancialCondition(projectedNet: number, projectedSavingsRate: numbe
 }
 
 export default function ReportsPage() {
-  const [transactions, setTransactions] = useState<Transaction[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [errorMessage, setErrorMessage] = useState("");
-  const [selectedRange, setSelectedRange] = useState<"monthly" | "yearly">("monthly");
-  const [chartRange, setChartRange] = useState<"monthly" | "yearly" | null>(null);
+  const [transactions, setTransactions] =
+    useState<Transaction[]>([]);
+
+  const [loading, setLoading] =
+    useState(true);
+
+  const [errorMessage, setErrorMessage] =
+    useState("");
+
+  const [selectedRange, setSelectedRange] =
+    useState<"monthly" | "yearly">(
+      "monthly"
+    );
+
+  const [chartRange, setChartRange] =
+    useState<
+      "monthly" | "yearly" | null
+    >(null);
+
+  /*
+   * Currency selected in Settings.
+   *
+   * IMPORTANT:
+   * Transaction amounts are NOT converted.
+   * This only controls how amounts are displayed.
+   */
+  const [currency, setCurrency] =
+    useState<CurrencyCode>("INR");
+
+  async function loadCurrency() {
+    try {
+      const {
+        data: { user },
+        error: userError,
+      } = await supabase.auth.getUser();
+
+      if (userError) {
+        console.error(
+          "Reports user error:",
+          userError
+        );
+        return;
+      }
+
+      if (!user) {
+        return;
+      }
+
+      const {
+        data: profileSettings,
+        error: profileError,
+      } = await supabase
+        .from("profiles")
+        .select("currency")
+        .eq("id", user.id)
+        .maybeSingle();
+
+      if (profileError) {
+        console.error(
+          "Reports currency error:",
+          profileError
+        );
+        return;
+      }
+
+      setCurrency(
+        (profileSettings?.currency as CurrencyCode) ||
+        "INR"
+      );
+    } catch (error) {
+      console.error(
+        "Load reports currency error:",
+        error
+      );
+    }
+  }
 
   async function loadTransactions() {
     try {
@@ -137,14 +214,24 @@ export default function ReportsPage() {
       setErrorMessage("");
 
       const data = await getTransactions();
-      setTransactions(data as Transaction[]);
+
+      setTransactions(
+        data as Transaction[]
+      );
     } catch (error) {
-      console.error("Reports load error:", error);
+      console.error(
+        "Reports load error:",
+        error
+      );
 
       if (error instanceof Error) {
-        setErrorMessage(error.message);
+        setErrorMessage(
+          error.message
+        );
       } else {
-        setErrorMessage("Something went wrong while loading reports.");
+        setErrorMessage(
+          "Something went wrong while loading reports."
+        );
       }
     } finally {
       setLoading(false);
@@ -153,131 +240,257 @@ export default function ReportsPage() {
 
   useEffect(() => {
     loadTransactions();
+    loadCurrency();
   }, []);
 
   const analysis = useMemo(() => {
     const today = new Date();
-    const sortedTransactions = [...transactions].sort(
-      (a, b) =>
-        new Date(a.transaction_date).getTime() -
-        new Date(b.transaction_date).getTime()
-    );
+
+    const sortedTransactions =
+      [...transactions].sort(
+        (a, b) =>
+          new Date(
+            a.transaction_date
+          ).getTime() -
+          new Date(
+            b.transaction_date
+          ).getTime()
+      );
 
     const firstTransactionDate =
-      sortedTransactions[0]?.transaction_date;
+      sortedTransactions[0]
+        ?.transaction_date;
 
-    const daysTracked = firstTransactionDate
-      ? Math.floor(
-        (today.getTime() -
-          new Date(firstTransactionDate).getTime()) /
-        (1000 * 60 * 60 * 24)
-      ) + 1
-      : 0;
+    const daysTracked =
+      firstTransactionDate
+        ? Math.floor(
+          (today.getTime() -
+            new Date(
+              firstTransactionDate
+            ).getTime()) /
+          (1000 * 60 * 60 * 24)
+        ) + 1
+        : 0;
 
-    const hasEnoughForecastData = daysTracked >= 30;
-    const currentMonthKey = getMonthKey(today);
-    const currentDay = today.getDate();
-    const daysInCurrentMonth = getDaysInMonth(today);
+    const hasEnoughForecastData =
+      daysTracked >= 30;
 
-    const summariesMap = new Map<string, MonthlySummary>();
-    const yearlyMap = new Map<string, YearlySummary>();
-    const categoryExpenseMap = new Map<string, number>();
+    const currentMonthKey =
+      getMonthKey(today);
+
+    const currentDay =
+      today.getDate();
+
+    const daysInCurrentMonth =
+      getDaysInMonth(today);
+
+    const summariesMap =
+      new Map<
+        string,
+        MonthlySummary
+      >();
+
+    const yearlyMap =
+      new Map<
+        string,
+        YearlySummary
+      >();
+
+    const categoryExpenseMap =
+      new Map<string, number>();
 
     let currentMonthIncome = 0;
     let currentMonthExpense = 0;
 
     for (const transaction of transactions) {
-      const transactionDate = new Date(transaction.transaction_date);
+      const transactionDate =
+        new Date(
+          transaction.transaction_date
+        );
 
-      if (Number.isNaN(transactionDate.getTime())) {
+      if (
+        Number.isNaN(
+          transactionDate.getTime()
+        )
+      ) {
         continue;
       }
 
-      const monthKey = getMonthKey(transactionDate);
-      const yearKey = String(transactionDate.getFullYear());
-      const amount = Number(transaction.amount) || 0;
+      const monthKey =
+        getMonthKey(
+          transactionDate
+        );
 
-      // Monthly
-      if (!summariesMap.has(monthKey)) {
-        summariesMap.set(monthKey, {
+      const yearKey = String(
+        transactionDate.getFullYear()
+      );
+
+      const amount =
+        Number(
+          transaction.amount
+        ) || 0;
+
+      /*
+       * Monthly
+       */
+      if (
+        !summariesMap.has(
+          monthKey
+        )
+      ) {
+        summariesMap.set(
           monthKey,
-          monthLabel: getMonthLabelFromKey(monthKey),
-          income: 0,
-          expense: 0,
-          net: 0,
-        });
+          {
+            monthKey,
+            monthLabel:
+              getMonthLabelFromKey(
+                monthKey
+              ),
+            income: 0,
+            expense: 0,
+            net: 0,
+          }
+        );
       }
 
-      const summary = summariesMap.get(monthKey)!;
+      const summary =
+        summariesMap.get(
+          monthKey
+        )!;
 
-      // Yearly
-      if (!yearlyMap.has(yearKey)) {
-        yearlyMap.set(yearKey, {
+      /*
+       * Yearly
+       */
+      if (
+        !yearlyMap.has(
+          yearKey
+        )
+      ) {
+        yearlyMap.set(
           yearKey,
-          yearLabel: yearKey,
-          income: 0,
-          expense: 0,
-          net: 0,
-        });
+          {
+            yearKey,
+            yearLabel:
+              yearKey,
+            income: 0,
+            expense: 0,
+            net: 0,
+          }
+        );
       }
 
-      const yearlySummary = yearlyMap.get(yearKey)!;
+      const yearlySummary =
+        yearlyMap.get(
+          yearKey
+        )!;
 
-      if (transaction.type === "income") {
+      if (
+        transaction.type ===
+        "income"
+      ) {
         summary.income += amount;
-        yearlySummary.income += amount;
+        yearlySummary.income +=
+          amount;
 
-        if (monthKey === currentMonthKey) {
-          currentMonthIncome += amount;
+        if (
+          monthKey ===
+          currentMonthKey
+        ) {
+          currentMonthIncome +=
+            amount;
         }
       } else {
         summary.expense += amount;
-        yearlySummary.expense += amount;
+        yearlySummary.expense +=
+          amount;
 
-        if (monthKey === currentMonthKey) {
-          currentMonthExpense += amount;
+        if (
+          monthKey ===
+          currentMonthKey
+        ) {
+          currentMonthExpense +=
+            amount;
         }
 
         const currentCategoryTotal =
-          categoryExpenseMap.get(transaction.category) || 0;
-        categoryExpenseMap.set(transaction.category, currentCategoryTotal + amount);
+          categoryExpenseMap.get(
+            transaction.category
+          ) || 0;
+
+        categoryExpenseMap.set(
+          transaction.category,
+          currentCategoryTotal +
+          amount
+        );
       }
 
-      summary.net = summary.income - summary.expense;
-      yearlySummary.net = yearlySummary.income - yearlySummary.expense;
+      summary.net =
+        summary.income -
+        summary.expense;
+
+      yearlySummary.net =
+        yearlySummary.income -
+        yearlySummary.expense;
     }
 
-    const monthlySummaries = Array.from(summariesMap.values()).sort((a, b) =>
-      b.monthKey.localeCompare(a.monthKey)
-    );
+    const monthlySummaries =
+      Array.from(
+        summariesMap.values()
+      ).sort((a, b) =>
+        b.monthKey.localeCompare(
+          a.monthKey
+        )
+      );
 
-    const yearlySummaries = Array.from(yearlyMap.values()).sort((a, b) =>
-      b.yearKey.localeCompare(a.yearKey)
-    );
+    const yearlySummaries =
+      Array.from(
+        yearlyMap.values()
+      ).sort((a, b) =>
+        b.yearKey.localeCompare(
+          a.yearKey
+        )
+      );
 
-    const previousCompletedMonths = monthlySummaries.filter(
-      (summary) => summary.monthKey !== currentMonthKey
-    );
+    const previousCompletedMonths =
+      monthlySummaries.filter(
+        (summary) =>
+          summary.monthKey !==
+          currentMonthKey
+      );
 
     const currentMonthProjectedExpense =
       currentDay > 0
-        ? (currentMonthExpense / currentDay) * daysInCurrentMonth
+        ? (currentMonthExpense /
+          currentDay) *
+        daysInCurrentMonth
         : currentMonthExpense;
 
     const currentMonthProjectedIncome =
       currentDay > 0
-        ? (currentMonthIncome / currentDay) * daysInCurrentMonth
+        ? (currentMonthIncome /
+          currentDay) *
+        daysInCurrentMonth
         : currentMonthIncome;
 
     const averagePreviousIncome =
-      previousCompletedMonths.length > 0
-        ? previousCompletedMonths.reduce((sum, month) => sum + month.income, 0) /
+      previousCompletedMonths.length >
+        0
+        ? previousCompletedMonths.reduce(
+          (sum, month) =>
+            sum + month.income,
+          0
+        ) /
         previousCompletedMonths.length
         : currentMonthProjectedIncome;
 
     const averagePreviousExpense =
-      previousCompletedMonths.length > 0
-        ? previousCompletedMonths.reduce((sum, month) => sum + month.expense, 0) /
+      previousCompletedMonths.length >
+        0
+        ? previousCompletedMonths.reduce(
+          (sum, month) =>
+            sum + month.expense,
+          0
+        ) /
         previousCompletedMonths.length
         : currentMonthProjectedExpense;
 
@@ -287,79 +500,122 @@ export default function ReportsPage() {
 
     if (hasEnoughForecastData) {
       projectedNextMonthIncome =
-        previousCompletedMonths.length > 0
+        previousCompletedMonths.length >
+          0
           ? Math.round(
             (averagePreviousIncome +
-              currentMonthProjectedIncome) / 2
+              currentMonthProjectedIncome) /
+            2
           )
-          : Math.round(currentMonthProjectedIncome);
+          : Math.round(
+            currentMonthProjectedIncome
+          );
 
       projectedNextMonthExpense =
-        previousCompletedMonths.length > 0
+        previousCompletedMonths.length >
+          0
           ? Math.round(
             (averagePreviousExpense +
-              currentMonthProjectedExpense) / 2
+              currentMonthProjectedExpense) /
+            2
           )
-          : Math.round(currentMonthProjectedExpense);
+          : Math.round(
+            currentMonthProjectedExpense
+          );
 
       projectedNextMonthNet =
         projectedNextMonthIncome -
         projectedNextMonthExpense;
     }
 
-    const currentMonthNet = currentMonthIncome - currentMonthExpense;
+    const currentMonthNet =
+      currentMonthIncome -
+      currentMonthExpense;
 
     const currentSavingsRate =
-      currentMonthIncome > 0 ? (currentMonthNet / currentMonthIncome) * 100 : 0;
+      currentMonthIncome > 0
+        ? (currentMonthNet /
+          currentMonthIncome) *
+        100
+        : 0;
 
     const projectedSavingsRate =
       projectedNextMonthIncome > 0
-        ? (projectedNextMonthNet / projectedNextMonthIncome) * 100
+        ? (projectedNextMonthNet /
+          projectedNextMonthIncome) *
+        100
         : 0;
 
     const dailyAverageExpense =
-      currentDay > 0 ? currentMonthExpense / currentDay : 0;
+      currentDay > 0
+        ? currentMonthExpense /
+        currentDay
+        : 0;
 
-    const topCategories = Array.from(categoryExpenseMap.entries())
-      .map(([category, total]) => ({
-        category,
-        total,
-      }))
-      .sort((a, b) => b.total - a.total)
-      .slice(0, 5);
-
-    const condition = hasEnoughForecastData
-      ? getFinancialCondition(
-        projectedNextMonthNet,
-        projectedSavingsRate
+    const topCategories =
+      Array.from(
+        categoryExpenseMap.entries()
       )
-      : {
-        label: "Insufficient Data",
-        color: "text-zinc-300",
-        bg: "bg-zinc-500/10",
-        border: "border-zinc-500/20",
-        message:
-          "Continue using SpendX for at least 30 days before forecast predictions become available.",
-      };
+        .map(
+          ([category, total]) => ({
+            category,
+            total,
+          })
+        )
+        .sort(
+          (a, b) =>
+            b.total - a.total
+        )
+        .slice(0, 5);
+
+    const condition =
+      hasEnoughForecastData
+        ? getFinancialCondition(
+          projectedNextMonthNet,
+          projectedSavingsRate
+        )
+        : {
+          label:
+            "Insufficient Data",
+          color:
+            "text-zinc-300",
+          bg:
+            "bg-zinc-500/10",
+          border:
+            "border-zinc-500/20",
+          message:
+            "Continue using SpendX for at least 30 days before forecast predictions become available.",
+        };
 
     return {
-      currentMonthLabel: today.toLocaleDateString("en-IN", {
-        month: "long",
-        year: "numeric",
-      }),
+      currentMonthLabel:
+        today.toLocaleDateString(
+          "en-IN",
+          {
+            month: "long",
+            year: "numeric",
+          }
+        ),
+
       daysTracked,
       hasEnoughForecastData,
+
       currentMonthIncome,
       currentMonthExpense,
       currentMonthNet,
       currentSavingsRate,
+
       dailyAverageExpense,
+
       currentMonthProjectedIncome,
       currentMonthProjectedExpense,
+
       projectedNextMonthIncome,
       projectedNextMonthExpense,
       projectedNextMonthNet,
+
       projectedSavingsRate,
+
       monthlySummaries,
       yearlySummaries,
       topCategories,
@@ -385,15 +641,21 @@ export default function ReportsPage() {
               </h1>
 
               <p className="mt-2 text-zinc-400">
-                Monthly performance, spending behaviour, and next month
+                Monthly performance,
+                spending behaviour,
+                and next month
                 projection.
               </p>
             </div>
 
             <div className="rounded-2xl border border-white/[0.08] bg-white/[0.03] px-4 py-3 text-sm text-zinc-400">
-              <span className="text-zinc-500">Viewing:</span>{" "}
+              <span className="text-zinc-500">
+                Viewing:
+              </span>{" "}
               <span className="font-semibold text-white">
-                {analysis.currentMonthLabel}
+                {
+                  analysis.currentMonthLabel
+                }
               </span>
             </div>
           </div>
@@ -406,73 +668,124 @@ export default function ReportsPage() {
 
           {loading ? (
             <div className="flex items-center justify-center rounded-3xl border border-white/[0.08] bg-white/[0.03] py-20 text-zinc-400">
-              <Loader2 size={20} className="mr-2 animate-spin" />
+              <Loader2
+                size={20}
+                className="mr-2 animate-spin"
+              />
               Loading analysis...
             </div>
-          ) : transactions.length === 0 ? (
+          ) : transactions.length ===
+            0 ? (
             <div className="rounded-3xl border border-white/[0.08] bg-white/[0.03] px-6 py-20 text-center">
-              <BarChart3 className="mx-auto mb-4 text-zinc-500" size={40} />
+              <BarChart3
+                className="mx-auto mb-4 text-zinc-500"
+                size={40}
+              />
+
               <h3 className="text-lg font-bold text-white">
                 No data available yet
               </h3>
+
               <p className="mt-2 text-sm text-zinc-400">
-                Add income and expenses from the Transactions page to generate
-                your analysis.
+                Add income and
+                expenses from the
+                Transactions page to
+                generate your
+                analysis.
               </p>
             </div>
           ) : (
             <>
+              {/* =========================
+                  SUMMARY CARDS
+              ========================== */}
               <section className="mb-8 grid grid-cols-1 gap-4 md:grid-cols-4">
                 <div className="rounded-3xl border border-white/[0.08] bg-white/[0.03] p-5">
                   <div className="mb-4 flex h-11 w-11 items-center justify-center rounded-2xl bg-emerald-500/10 text-emerald-400">
-                    <ArrowDownRight size={20} />
+                    <ArrowDownRight
+                      size={20}
+                    />
                   </div>
 
-                  <p className="text-xs text-zinc-500">This Month Income</p>
+                  <p className="text-xs text-zinc-500">
+                    This Month Income
+                  </p>
+
                   <h3 className="mt-2 font-mono text-xl font-bold text-emerald-400">
-                    {formatCurrency(analysis.currentMonthIncome)}
+                    {formatCurrencyValue(
+                      analysis.currentMonthIncome,
+                      currency
+                    )}
                   </h3>
                 </div>
 
                 <div className="rounded-3xl border border-white/[0.08] bg-white/[0.03] p-5">
                   <div className="mb-4 flex h-11 w-11 items-center justify-center rounded-2xl bg-red-500/10 text-red-400">
-                    <ArrowUpRight size={20} />
+                    <ArrowUpRight
+                      size={20}
+                    />
                   </div>
 
-                  <p className="text-xs text-zinc-500">This Month Expense</p>
+                  <p className="text-xs text-zinc-500">
+                    This Month Expense
+                  </p>
+
                   <h3 className="mt-2 font-mono text-xl font-bold text-red-400">
-                    {formatCurrency(analysis.currentMonthExpense)}
+                    {formatCurrencyValue(
+                      analysis.currentMonthExpense,
+                      currency
+                    )}
                   </h3>
                 </div>
 
                 <div className="rounded-3xl border border-white/[0.08] bg-white/[0.03] p-5">
                   <div className="mb-4 flex h-11 w-11 items-center justify-center rounded-2xl bg-cyan-500/10 text-cyan-400">
-                    <PiggyBank size={20} />
+                    <PiggyBank
+                      size={20}
+                    />
                   </div>
 
-                  <p className="text-xs text-zinc-500">Net Savings</p>
+                  <p className="text-xs text-zinc-500">
+                    Net Savings
+                  </p>
+
                   <h3
-                    className={`mt-2 font-mono text-xl font-bold ${analysis.currentMonthNet >= 0
+                    className={`mt-2 font-mono text-xl font-bold ${analysis.currentMonthNet >=
+                      0
                       ? "text-cyan-300"
                       : "text-red-400"
                       }`}
                   >
-                    {formatCurrency(analysis.currentMonthNet)}
+                    {formatCurrencyValue(
+                      analysis.currentMonthNet,
+                      currency
+                    )}
                   </h3>
                 </div>
 
                 <div className="rounded-3xl border border-white/[0.08] bg-white/[0.03] p-5">
                   <div className="mb-4 flex h-11 w-11 items-center justify-center rounded-2xl bg-violet-500/10 text-violet-300">
-                    <Activity size={20} />
+                    <Activity
+                      size={20}
+                    />
                   </div>
 
-                  <p className="text-xs text-zinc-500">Savings Rate</p>
+                  <p className="text-xs text-zinc-500">
+                    Savings Rate
+                  </p>
+
                   <h3 className="mt-2 font-mono text-xl font-bold text-white">
-                    {analysis.currentSavingsRate.toFixed(1)}%
+                    {analysis.currentSavingsRate.toFixed(
+                      1
+                    )}
+                    %
                   </h3>
                 </div>
               </section>
 
+              {/* =========================
+                  FORECAST
+              ========================== */}
               <section className="mb-8 grid grid-cols-1 gap-6 lg:grid-cols-3">
                 <div className="rounded-3xl border border-white/[0.08] bg-white/[0.03] p-6 lg:col-span-2">
                   <div className="mb-6 flex items-center justify-between">
@@ -480,6 +793,7 @@ export default function ReportsPage() {
                       <h3 className="font-mono text-base font-semibold text-white">
                         Next Month Forecast
                       </h3>
+
                       <p className="mt-1 text-xs text-zinc-500">
                         {analysis.hasEnoughForecastData
                           ? "Estimated using your recent income and expense pattern."
@@ -490,43 +804,66 @@ export default function ReportsPage() {
                     <div
                       className={`rounded-full border px-3 py-1 text-xs font-bold ${analysis.condition.border} ${analysis.condition.bg} ${analysis.condition.color}`}
                     >
-                      {analysis.condition.label}
+                      {
+                        analysis
+                          .condition
+                          .label
+                      }
                     </div>
                   </div>
 
                   <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
                     <div className="rounded-2xl border border-white/[0.06] bg-black/20 p-4">
                       <div className="mb-3 flex items-center gap-2 text-xs text-zinc-500">
-                        <TrendingUp size={14} />
+                        <TrendingUp
+                          size={14}
+                        />
                         Projected Income
                       </div>
+
                       <p className="font-mono text-lg font-bold text-emerald-400">
-                        {formatCurrency(analysis.projectedNextMonthIncome)}
+                        {formatCurrencyValue(
+                          analysis.projectedNextMonthIncome,
+                          currency
+                        )}
                       </p>
                     </div>
 
                     <div className="rounded-2xl border border-white/[0.06] bg-black/20 p-4">
                       <div className="mb-3 flex items-center gap-2 text-xs text-zinc-500">
-                        <TrendingDown size={14} />
+                        <TrendingDown
+                          size={14}
+                        />
                         Projected Expense
                       </div>
+
                       <p className="font-mono text-lg font-bold text-red-400">
-                        {formatCurrency(analysis.projectedNextMonthExpense)}
+                        {formatCurrencyValue(
+                          analysis.projectedNextMonthExpense,
+                          currency
+                        )}
                       </p>
                     </div>
 
                     <div className="rounded-2xl border border-white/[0.06] bg-black/20 p-4">
                       <div className="mb-3 flex items-center gap-2 text-xs text-zinc-500">
-                        <Wallet size={14} />
+                        <Wallet
+                          size={14}
+                        />
                         Projected Net
                       </div>
+
                       <p
-                        className={`font-mono text-lg font-bold ${analysis.projectedNextMonthNet >= 0
+                        className={`font-mono text-lg font-bold ${analysis.projectedNextMonthNet >=
+                          0
                           ? "text-cyan-300"
                           : "text-red-400"
                           }`}
                       >
-                        {formatCurrency(analysis.projectedNextMonthNet)}
+                        {formatCurrencyValue(
+                          analysis.projectedNextMonthNet,
+                          currency
+                        )}
                       </p>
                     </div>
                   </div>
@@ -537,52 +874,84 @@ export default function ReportsPage() {
                     <div className="mb-2 flex items-center gap-2">
                       <ShieldCheck
                         size={16}
-                        className={analysis.condition.color}
+                        className={
+                          analysis
+                            .condition
+                            .color
+                        }
                       />
+
                       <p
                         className={`text-sm font-bold ${analysis.condition.color}`}
                       >
-                        Financial Condition: {analysis.condition.label}
+                        Financial
+                        Condition:{" "}
+                        {
+                          analysis
+                            .condition
+                            .label
+                        }
                       </p>
                     </div>
 
                     <p className="text-sm text-zinc-300">
-                      {analysis.condition.message}
+                      {
+                        analysis
+                          .condition
+                          .message
+                      }
                     </p>
                   </div>
                 </div>
 
+                {/* =========================
+                    CURRENT MONTH PACE
+                ========================== */}
                 <div className="rounded-3xl border border-white/[0.08] bg-white/[0.03] p-6">
                   <h3 className="font-mono text-base font-semibold text-white">
                     Current Month Pace
                   </h3>
 
                   <p className="mt-1 text-xs text-zinc-500">
-                    Based on your daily average so far.
+                    Based on your daily
+                    average so far.
                   </p>
 
                   <div className="mt-6 space-y-4">
                     <div className="rounded-2xl border border-white/[0.06] bg-black/20 p-4">
                       <p className="text-xs text-zinc-500">
-                        Daily Average Expense
+                        Daily Average
+                        Expense
                       </p>
+
                       <p className="mt-2 font-mono text-lg font-bold text-red-300">
-                        {formatCurrency(analysis.dailyAverageExpense)}
+                        {formatCurrencyValue(
+                          analysis.dailyAverageExpense,
+                          currency
+                        )}
                       </p>
                     </div>
 
                     <div className="rounded-2xl border border-white/[0.06] bg-black/20 p-4">
                       <p className="text-xs text-zinc-500">
-                        Full Month Expense Projection
+                        Full Month
+                        Expense Projection
                       </p>
+
                       <p className="mt-2 font-mono text-lg font-bold text-white">
-                        {formatCurrency(analysis.currentMonthProjectedExpense)}
+                        {formatCurrencyValue(
+                          analysis.currentMonthProjectedExpense,
+                          currency
+                        )}
                       </p>
                     </div>
                   </div>
                 </div>
               </section>
 
+              {/* =========================
+                  HISTORY + CATEGORIES
+              ========================== */}
               <section className="grid grid-cols-1 gap-6 lg:grid-cols-2">
                 <div className="rounded-3xl border border-white/[0.08] bg-white/[0.03] p-6">
                   <div className="mb-6">
@@ -591,139 +960,263 @@ export default function ReportsPage() {
                         <h3 className="font-mono text-base font-semibold text-white">
                           History
                         </h3>
+
                         <p className="mt-1 text-xs text-zinc-500">
-                          {chartRange === "monthly"
+                          {chartRange ===
+                            "monthly"
                             ? "Monthly income vs expense visual representation."
-                            : chartRange === "yearly"
-                            ? "Yearly income vs expense visual representation."
-                            : "Income, expense, and net history."}
+                            : chartRange ===
+                              "yearly"
+                              ? "Yearly income vs expense visual representation."
+                              : "Income, expense, and net history."}
                         </p>
                       </div>
 
-                      {chartRange !== null ? (
+                      {chartRange !==
+                        null ? (
                         <button
                           type="button"
-                          onClick={() => setChartRange(null)}
-                          className="rounded-xl border border-white/[0.08] bg-white/[0.03] px-3 py-1.5 text-xs font-semibold text-zinc-400 hover:text-white transition-colors"
+                          onClick={() =>
+                            setChartRange(
+                              null
+                            )
+                          }
+                          className="rounded-xl border border-white/[0.08] bg-white/[0.03] px-3 py-1.5 text-xs font-semibold text-zinc-400 transition-colors hover:text-white"
                         >
                           Show List
                         </button>
                       ) : (
-                        <CalendarDays size={18} className="text-zinc-500" />
+                        <CalendarDays
+                          size={18}
+                          className="text-zinc-500"
+                        />
                       )}
                     </div>
 
                     <div className="mt-4 flex items-center gap-3">
                       <select
-                        value={selectedRange}
-                        onChange={(e) => setSelectedRange(e.target.value as "monthly" | "yearly")}
+                        value={
+                          selectedRange
+                        }
+                        onChange={(e) =>
+                          setSelectedRange(
+                            e.target
+                              .value as
+                            | "monthly"
+                            | "yearly"
+                          )
+                        }
                         className="rounded-xl border border-white/[0.08] bg-black/40 px-3 py-2 text-xs font-semibold text-zinc-300 outline-none focus:border-emerald-500/50"
                       >
-                        <option value="monthly">Monthly</option>
-                        <option value="yearly">Yearly</option>
+                        <option value="monthly">
+                          Monthly
+                        </option>
+
+                        <option value="yearly">
+                          Yearly
+                        </option>
                       </select>
 
                       <button
                         type="button"
-                        onClick={() => setChartRange(selectedRange)}
-                        className="flex items-center gap-1.5 rounded-xl bg-emerald-500 px-4 py-2 text-xs font-bold text-black hover:bg-emerald-400 transition-colors"
+                        onClick={() =>
+                          setChartRange(
+                            selectedRange
+                          )
+                        }
+                        className="flex items-center gap-1.5 rounded-xl bg-emerald-500 px-4 py-2 text-xs font-bold text-black transition-colors hover:bg-emerald-400"
                       >
-                        <BarChart3 size={12} />
+                        <BarChart3
+                          size={12}
+                        />
+
                         Analyze
                       </button>
                     </div>
                   </div>
 
                   <div className="space-y-3">
-                    {chartRange === null ? (
-                      selectedRange === "monthly" ? (
-                        analysis.monthlySummaries.slice(0, 6).map((month) => (
-                          <div
-                            key={month.monthKey}
-                            className="rounded-2xl border border-white/[0.06] bg-black/20 p-4"
-                          >
-                            <div className="mb-3 flex items-center justify-between">
-                              <p className="text-sm font-bold text-white">
-                                {month.monthLabel}
-                              </p>
-
-                              <p
-                                className={`font-mono text-sm font-bold ${month.net >= 0 ? "text-cyan-300" : "text-red-400"
-                                  }`}
+                    {chartRange ===
+                      null ? (
+                      selectedRange ===
+                        "monthly" ? (
+                        analysis.monthlySummaries
+                          .slice(
+                            0,
+                            6
+                          )
+                          .map(
+                            (
+                              month
+                            ) => (
+                              <div
+                                key={
+                                  month.monthKey
+                                }
+                                className="rounded-2xl border border-white/[0.06] bg-black/20 p-4"
                               >
-                                {formatCurrency(month.net)}
-                              </p>
-                            </div>
+                                <div className="mb-3 flex items-center justify-between">
+                                  <p className="text-sm font-bold text-white">
+                                    {
+                                      month.monthLabel
+                                    }
+                                  </p>
 
-                            <div className="grid grid-cols-2 gap-3 text-xs">
-                              <div>
-                                <p className="text-zinc-500">Income</p>
-                                <p className="mt-1 font-mono text-emerald-400">
-                                  {formatCurrency(month.income)}
-                                </p>
-                              </div>
+                                  <p
+                                    className={`font-mono text-sm font-bold ${month.net >=
+                                      0
+                                      ? "text-cyan-300"
+                                      : "text-red-400"
+                                      }`}
+                                  >
+                                    {formatCurrencyValue(
+                                      month.net,
+                                      currency
+                                    )}
+                                  </p>
+                                </div>
 
-                              <div>
-                                <p className="text-zinc-500">Expense</p>
-                                <p className="mt-1 font-mono text-red-400">
-                                  {formatCurrency(month.expense)}
-                                </p>
+                                <div className="grid grid-cols-2 gap-3 text-xs">
+                                  <div>
+                                    <p className="text-zinc-500">
+                                      Income
+                                    </p>
+
+                                    <p className="mt-1 font-mono text-emerald-400">
+                                      {formatCurrencyValue(
+                                        month.income,
+                                        currency
+                                      )}
+                                    </p>
+                                  </div>
+
+                                  <div>
+                                    <p className="text-zinc-500">
+                                      Expense
+                                    </p>
+
+                                    <p className="mt-1 font-mono text-red-400">
+                                      {formatCurrencyValue(
+                                        month.expense,
+                                        currency
+                                      )}
+                                    </p>
+                                  </div>
+                                </div>
                               </div>
-                            </div>
-                          </div>
-                        ))
+                            )
+                          )
                       ) : (
-                        analysis.yearlySummaries.slice(0, 6).map((year) => (
-                          <div
-                            key={year.yearKey}
-                            className="rounded-2xl border border-white/[0.06] bg-black/20 p-4"
-                          >
-                            <div className="mb-3 flex items-center justify-between">
-                              <p className="text-sm font-bold text-white">
-                                Year {year.yearLabel}
-                              </p>
-
-                              <p
-                                className={`font-mono text-sm font-bold ${year.net >= 0 ? "text-cyan-300" : "text-red-400"
-                                  }`}
+                        analysis.yearlySummaries
+                          .slice(
+                            0,
+                            6
+                          )
+                          .map(
+                            (
+                              year
+                            ) => (
+                              <div
+                                key={
+                                  year.yearKey
+                                }
+                                className="rounded-2xl border border-white/[0.06] bg-black/20 p-4"
                               >
-                                {formatCurrency(year.net)}
-                              </p>
-                            </div>
+                                <div className="mb-3 flex items-center justify-between">
+                                  <p className="text-sm font-bold text-white">
+                                    Year{" "}
+                                    {
+                                      year.yearLabel
+                                    }
+                                  </p>
 
-                            <div className="grid grid-cols-2 gap-3 text-xs">
-                              <div>
-                                <p className="text-zinc-500">Income</p>
-                                <p className="mt-1 font-mono text-emerald-400">
-                                  {formatCurrency(year.income)}
-                                </p>
-                              </div>
+                                  <p
+                                    className={`font-mono text-sm font-bold ${year.net >=
+                                      0
+                                      ? "text-cyan-300"
+                                      : "text-red-400"
+                                      }`}
+                                  >
+                                    {formatCurrencyValue(
+                                      year.net,
+                                      currency
+                                    )}
+                                  </p>
+                                </div>
 
-                              <div>
-                                <p className="text-zinc-500">Expense</p>
-                                <p className="mt-1 font-mono text-red-400">
-                                  {formatCurrency(year.expense)}
-                                </p>
+                                <div className="grid grid-cols-2 gap-3 text-xs">
+                                  <div>
+                                    <p className="text-zinc-500">
+                                      Income
+                                    </p>
+
+                                    <p className="mt-1 font-mono text-emerald-400">
+                                      {formatCurrencyValue(
+                                        year.income,
+                                        currency
+                                      )}
+                                    </p>
+                                  </div>
+
+                                  <div>
+                                    <p className="text-zinc-500">
+                                      Expense
+                                    </p>
+
+                                    <p className="mt-1 font-mono text-red-400">
+                                      {formatCurrencyValue(
+                                        year.expense,
+                                        currency
+                                      )}
+                                    </p>
+                                  </div>
+                                </div>
                               </div>
-                            </div>
-                          </div>
-                        ))
+                            )
+                          )
                       )
                     ) : (
                       (() => {
-                        const chartData = chartRange === "monthly"
-                          ? [...analysis.monthlySummaries].reverse().slice(-6)
-                          : [...analysis.yearlySummaries].reverse().slice(-5);
+                        const chartData =
+                          chartRange ===
+                            "monthly"
+                            ? [
+                              ...analysis.monthlySummaries,
+                            ]
+                              .reverse()
+                              .slice(
+                                -6
+                              )
+                            : [
+                              ...analysis.yearlySummaries,
+                            ]
+                              .reverse()
+                              .slice(
+                                -5
+                              );
 
-                        const maxVal = Math.max(
-                          ...chartData.map((d) => Math.max(d.income, d.expense)),
-                          1
-                        );
+                        const maxVal =
+                          Math.max(
+                            ...chartData.map(
+                              (d) =>
+                                Math.max(
+                                  d.income,
+                                  d.expense
+                                )
+                            ),
+                            1
+                          );
 
-                        if (chartData.length === 0) {
+                        if (
+                          chartData.length ===
+                          0
+                        ) {
                           return (
                             <div className="rounded-2xl border border-white/[0.06] bg-black/20 p-6 text-center text-sm text-zinc-400">
-                              No data available for analysis.
+                              No data
+                              available
+                              for
+                              analysis.
                             </div>
                           );
                         }
@@ -731,89 +1224,185 @@ export default function ReportsPage() {
                         return (
                           <div className="relative rounded-2xl border border-white/[0.06] bg-black/20 p-6">
                             {/* Guidelines */}
-                            <div className="absolute inset-y-6 left-16 right-6 flex flex-col justify-between pointer-events-none">
-                              <div className="border-t border-white/[0.04] w-full" />
-                              <div className="border-t border-white/[0.04] w-full" />
-                              <div className="border-t border-white/[0.04] w-full" />
+                            <div className="pointer-events-none absolute inset-y-6 left-16 right-6 flex flex-col justify-between">
+                              <div className="w-full border-t border-white/[0.04]" />
+                              <div className="w-full border-t border-white/[0.04]" />
+                              <div className="w-full border-t border-white/[0.04]" />
                             </div>
 
                             {/* Chart Area */}
-                            <div className="flex h-56 items-end justify-between gap-3 pl-12 pr-2 relative z-10">
-                              {/* Y-Axis scale label indicators */}
-                              <div className="absolute left-0 bottom-0 top-0 flex flex-col justify-between text-[10px] text-zinc-500 select-none w-10 text-right pr-2">
-                                <span>{formatCurrency(maxVal)}</span>
-                                <span>{formatCurrency(maxVal / 2)}</span>
-                                <span>{formatCurrency(0)}</span>
+                            <div className="relative z-10 flex h-56 items-end justify-between gap-3 pl-12 pr-2">
+                              {/* Y-Axis */}
+                              <div className="absolute left-0 top-0 bottom-0 flex w-10 select-none flex-col justify-between pr-2 text-right text-[10px] text-zinc-500">
+                                <span>
+                                  {formatCurrencyValue(
+                                    maxVal,
+                                    currency
+                                  )}
+                                </span>
+
+                                <span>
+                                  {formatCurrencyValue(
+                                    maxVal /
+                                    2,
+                                    currency
+                                  )}
+                                </span>
+
+                                <span>
+                                  {formatCurrencyValue(
+                                    0,
+                                    currency
+                                  )}
+                                </span>
                               </div>
 
                               {/* Columns */}
-                              {chartData.map((d) => {
-                                const isMonthly = chartRange === "monthly";
-                                const m = d as MonthlySummary;
-                                const y = d as YearlySummary;
+                              {chartData.map(
+                                (d) => {
+                                  const isMonthly =
+                                    chartRange ===
+                                    "monthly";
 
-                                const label = isMonthly
-                                  ? m.monthLabel.split(" ")[0]
-                                  : y.yearLabel;
+                                  const m =
+                                    d as MonthlySummary;
 
-                                const key = isMonthly ? m.monthKey : y.yearKey;
+                                  const y =
+                                    d as YearlySummary;
 
-                                return (
-                                  <div key={key} className="group relative flex flex-col items-center flex-1 h-full justify-end">
-                                    {/* Tooltip on hover */}
-                                    <div className="absolute bottom-[105%] hidden group-hover:flex flex-col items-center z-50">
-                                      <div className="rounded-xl border border-white/10 bg-zinc-900/90 px-3 py-2 text-[11px] text-white shadow-xl backdrop-blur-md">
-                                        <p className="font-bold text-center border-b border-white/5 pb-1 mb-1 text-zinc-300">
-                                          {isMonthly ? m.monthLabel : `Year ${y.yearLabel}`}
-                                        </p>
-                                        <div className="space-y-0.5">
-                                          <p className="flex justify-between gap-4">
-                                            <span className="text-zinc-400">Income:</span>
-                                            <span className="font-mono text-emerald-400 font-semibold">{formatCurrency(d.income)}</span>
+                                  const label =
+                                    isMonthly
+                                      ? m.monthLabel.split(
+                                        " "
+                                      )[0]
+                                      : y.yearLabel;
+
+                                  const key =
+                                    isMonthly
+                                      ? m.monthKey
+                                      : y.yearKey;
+
+                                  return (
+                                    <div
+                                      key={
+                                        key
+                                      }
+                                      className="group relative flex h-full flex-1 flex-col items-center justify-end"
+                                    >
+                                      {/* Tooltip */}
+                                      <div className="absolute bottom-[105%] z-50 hidden flex-col items-center group-hover:flex">
+                                        <div className="rounded-xl border border-white/10 bg-zinc-900/90 px-3 py-2 text-[11px] text-white shadow-xl backdrop-blur-md">
+                                          <p className="mb-1 border-b border-white/5 pb-1 text-center font-bold text-zinc-300">
+                                            {isMonthly
+                                              ? m.monthLabel
+                                              : `Year ${y.yearLabel}`}
                                           </p>
-                                          <p className="flex justify-between gap-4">
-                                            <span className="text-zinc-400">Expense:</span>
-                                            <span className="font-mono text-red-400 font-semibold">{formatCurrency(d.expense)}</span>
-                                          </p>
-                                          <p className="flex justify-between gap-4 border-t border-white/5 pt-1 mt-1">
-                                            <span className="text-zinc-400">Net:</span>
-                                            <span className={`font-mono font-bold ${d.net >= 0 ? "text-cyan-300" : "text-red-400"}`}>{formatCurrency(d.net)}</span>
-                                          </p>
+
+                                          <div className="space-y-0.5">
+                                            <p className="flex justify-between gap-4">
+                                              <span className="text-zinc-400">
+                                                Income:
+                                              </span>
+
+                                              <span className="font-mono font-semibold text-emerald-400">
+                                                {formatCurrencyValue(
+                                                  d.income,
+                                                  currency
+                                                )}
+                                              </span>
+                                            </p>
+
+                                            <p className="flex justify-between gap-4">
+                                              <span className="text-zinc-400">
+                                                Expense:
+                                              </span>
+
+                                              <span className="font-mono font-semibold text-red-400">
+                                                {formatCurrencyValue(
+                                                  d.expense,
+                                                  currency
+                                                )}
+                                              </span>
+                                            </p>
+
+                                            <p className="mt-1 flex justify-between gap-4 border-t border-white/5 pt-1">
+                                              <span className="text-zinc-400">
+                                                Net:
+                                              </span>
+
+                                              <span
+                                                className={`font-mono font-bold ${d.net >=
+                                                  0
+                                                  ? "text-cyan-300"
+                                                  : "text-red-400"
+                                                  }`}
+                                              >
+                                                {formatCurrencyValue(
+                                                  d.net,
+                                                  currency
+                                                )}
+                                              </span>
+                                            </p>
+                                          </div>
+                                        </div>
+
+                                        <div className="-mt-1 h-2 w-2 rotate-45 border-b border-r border-white/10 bg-zinc-900/90" />
+                                      </div>
+
+                                      {/* Bars */}
+                                      <div className="flex h-[85%] w-full items-end justify-center gap-1.5 px-1">
+                                        {/* Income */}
+                                        <div className="relative flex h-full max-w-[20px] flex-1 flex-col justify-end">
+                                          <motion.div
+                                            initial={{
+                                              height: 0,
+                                            }}
+                                            animate={{
+                                              height: `${(d.income /
+                                                maxVal) *
+                                                100
+                                                }%`,
+                                            }}
+                                            transition={{
+                                              duration:
+                                                0.6,
+                                              ease: "easeOut",
+                                            }}
+                                            className="w-full cursor-pointer rounded-t-lg bg-gradient-to-t from-emerald-600/30 to-emerald-400 shadow-[0_0_12px_rgba(52,211,153,0.15)] transition-all group-hover:brightness-110"
+                                          />
+                                        </div>
+
+                                        {/* Expense */}
+                                        <div className="relative flex h-full max-w-[20px] flex-1 flex-col justify-end">
+                                          <motion.div
+                                            initial={{
+                                              height: 0,
+                                            }}
+                                            animate={{
+                                              height: `${(d.expense /
+                                                maxVal) *
+                                                100
+                                                }%`,
+                                            }}
+                                            transition={{
+                                              duration:
+                                                0.6,
+                                              ease: "easeOut",
+                                              delay: 0.1,
+                                            }}
+                                            className="w-full cursor-pointer rounded-t-lg bg-gradient-to-t from-red-600/30 to-red-400 shadow-[0_0_12px_rgba(248,113,113,0.15)] transition-all group-hover:brightness-110"
+                                          />
                                         </div>
                                       </div>
-                                      <div className="w-2 h-2 rotate-45 bg-zinc-900/90 border-r border-b border-white/10 -mt-1" />
+
+                                      {/* Label */}
+                                      <span className="mt-2 w-full truncate text-center text-[10px] font-semibold text-zinc-400 transition-colors group-hover:text-white">
+                                        {label}
+                                      </span>
                                     </div>
-
-                                    {/* Bars Container */}
-                                    <div className="flex items-end gap-1.5 w-full h-[85%] justify-center px-1">
-                                      {/* Income Bar */}
-                                      <div className="relative flex-1 max-w-[20px] h-full flex flex-col justify-end">
-                                        <motion.div
-                                          initial={{ height: 0 }}
-                                          animate={{ height: `${(d.income / maxVal) * 100}%` }}
-                                          transition={{ duration: 0.6, ease: "easeOut" }}
-                                          className="w-full rounded-t-lg bg-gradient-to-t from-emerald-600/30 to-emerald-400 shadow-[0_0_12px_rgba(52,211,153,0.15)] group-hover:brightness-110 transition-all cursor-pointer"
-                                        />
-                                      </div>
-
-                                      {/* Expense Bar */}
-                                      <div className="relative flex-1 max-w-[20px] h-full flex flex-col justify-end">
-                                        <motion.div
-                                          initial={{ height: 0 }}
-                                          animate={{ height: `${(d.expense / maxVal) * 100}%` }}
-                                          transition={{ duration: 0.6, ease: "easeOut", delay: 0.1 }}
-                                          className="w-full rounded-t-lg bg-gradient-to-t from-red-600/30 to-red-400 shadow-[0_0_12px_rgba(248,113,113,0.15)] group-hover:brightness-110 transition-all cursor-pointer"
-                                        />
-                                      </div>
-                                    </div>
-
-                                    {/* Label */}
-                                    <span className="mt-2 text-[10px] font-semibold text-zinc-400 group-hover:text-white transition-colors truncate w-full text-center">
-                                      {label}
-                                    </span>
-                                  </div>
-                                );
-                              })}
+                                  );
+                                }
+                              )}
                             </div>
                           </div>
                         );
@@ -822,59 +1411,98 @@ export default function ReportsPage() {
                   </div>
                 </div>
 
+                {/* =========================
+                    TOP CATEGORIES
+                ========================== */}
                 <div className="rounded-3xl border border-white/[0.08] bg-white/[0.03] p-6">
                   <div className="mb-6 flex items-center justify-between">
                     <div>
                       <h3 className="font-mono text-base font-semibold text-white">
-                        Top Spending Categories
+                        Top Spending
+                        Categories
                       </h3>
+
                       <p className="mt-1 text-xs text-zinc-500">
-                        Your biggest expense areas.
+                        Your biggest
+                        expense areas.
                       </p>
                     </div>
 
-                    <IndianRupee size={18} className="text-zinc-500" />
+                    <Wallet
+                      size={18}
+                      className="text-zinc-500"
+                    />
                   </div>
 
-                  {analysis.topCategories.length === 0 ? (
+                  {analysis.topCategories
+                    .length ===
+                    0 ? (
                     <div className="rounded-2xl border border-white/[0.06] bg-black/20 p-6 text-center text-sm text-zinc-400">
-                      No expense categories yet.
+                      No expense
+                      categories yet.
                     </div>
                   ) : (
                     <div className="space-y-3">
-                      {analysis.topCategories.map((item, index) => {
-                        const maxTotal = analysis.topCategories[0]?.total || 1;
-                        const width = Math.max((item.total / maxTotal) * 100, 8);
+                      {analysis.topCategories.map(
+                        (
+                          item,
+                          index
+                        ) => {
+                          const maxTotal =
+                            analysis
+                              .topCategories[0]
+                              ?.total ||
+                            1;
 
-                        return (
-                          <div
-                            key={item.category}
-                            className="rounded-2xl border border-white/[0.06] bg-black/20 p-4"
-                          >
-                            <div className="mb-3 flex items-center justify-between">
-                              <div className="flex items-center gap-2">
-                                <span className="flex h-6 w-6 items-center justify-center rounded-full bg-white/5 text-[10px] text-zinc-400">
-                                  {index + 1}
-                                </span>
-                                <p className="text-sm font-bold text-white">
-                                  {item.category}
+                          const width =
+                            Math.max(
+                              (item.total /
+                                maxTotal) *
+                              100,
+                              8
+                            );
+
+                          return (
+                            <div
+                              key={
+                                item.category
+                              }
+                              className="rounded-2xl border border-white/[0.06] bg-black/20 p-4"
+                            >
+                              <div className="mb-3 flex items-center justify-between">
+                                <div className="flex items-center gap-2">
+                                  <span className="flex h-6 w-6 items-center justify-center rounded-full bg-white/5 text-[10px] text-zinc-400">
+                                    {index +
+                                      1}
+                                  </span>
+
+                                  <p className="text-sm font-bold text-white">
+                                    {
+                                      item.category
+                                    }
+                                  </p>
+                                </div>
+
+                                <p className="font-mono text-sm font-bold text-red-400">
+                                  {formatCurrencyValue(
+                                    item.total,
+                                    currency
+                                  )}
                                 </p>
                               </div>
 
-                              <p className="font-mono text-sm font-bold text-red-400">
-                                {formatCurrency(item.total)}
-                              </p>
+                              <div className="h-2 overflow-hidden rounded-full bg-white/[0.06]">
+                                <div
+                                  className="h-full rounded-full bg-red-500/60"
+                                  style={{
+                                    width: `${width}%`,
+                                  }}
+                                />
+                              </div>
                             </div>
-
-                            <div className="h-2 overflow-hidden rounded-full bg-white/[0.06]">
-                              <div
-                                className="h-full rounded-full bg-red-500/60"
-                                style={{ width: `${width}%` }}
-                              />
-                            </div>
-                          </div>
-                        );
-                      })}
+                          );
+                        }
+                      )}
                     </div>
                   )}
                 </div>
