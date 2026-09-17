@@ -21,8 +21,14 @@ import {
   Check,
   X,
 } from "lucide-react";
+
+// IMPORTANT:
+// Keep using the existing Supabase client.
+// Do NOT replace this with "@/lib/supabase/client".
 import { supabase } from "@/lib/supabase";
+
 import { useTheme } from "@/components/theme-provider";
+import { currencies, type CurrencyCode } from "@/lib/currencies";
 
 type ActivePanel =
   | "profile"
@@ -121,16 +127,21 @@ export default function Settings() {
 
   const [profile, setProfile] = useState<UserProfile | null>(null);
   const [displayName, setDisplayName] = useState("");
-  const [expandedItems, setExpandedItems] = useState<Set<ActivePanel>>(new Set());
+
+  const [expandedItems, setExpandedItems] = useState<Set<ActivePanel>>(
+    new Set()
+  );
 
   const toggleExpanded = (itemId: ActivePanel) => {
     setExpandedItems((prev) => {
       const next = new Set(prev);
+
       if (next.has(itemId)) {
         next.delete(itemId);
       } else {
         next.add(itemId);
       }
+
       return next;
     });
   };
@@ -142,7 +153,10 @@ export default function Settings() {
   const [twoFactor, setTwoFactor] = useState(false);
   const [biometricLock, setBiometricLock] = useState(false);
 
-  const [currency, setCurrency] = useState("INR");
+  // Currency is stored in profiles.currency.
+  // Database transaction amounts are NOT modified.
+  const [currency, setCurrency] = useState<CurrencyCode>("INR");
+
   const [language, setLanguage] = useState("English");
 
   const [paymentConnected, setPaymentConnected] = useState(false);
@@ -210,12 +224,23 @@ export default function Settings() {
       setErrorMessage("");
       setMessage("");
 
+      /*
+       * Use the existing SpendX Supabase client.
+       * This keeps the same authentication/session flow
+       * that AuthGuard and the rest of the application use.
+       */
       const {
         data: { user },
         error,
       } = await supabase.auth.getUser();
 
-      if (error || !user) {
+      if (error) {
+        console.error("Get user error:", error);
+        router.push("/login");
+        return;
+      }
+
+      if (!user) {
         router.push("/login");
         return;
       }
@@ -227,7 +252,9 @@ export default function Settings() {
         "User";
 
       const avatar =
-        user.user_metadata?.avatar_url || user.user_metadata?.picture || null;
+        user.user_metadata?.avatar_url ||
+        user.user_metadata?.picture ||
+        null;
 
       const loadedProfile: UserProfile = {
         id: user.id,
@@ -239,29 +266,81 @@ export default function Settings() {
       setProfile(loadedProfile);
       setDisplayName(name);
 
+      /*
+       * Load locally stored preferences.
+       */
       const savedSettings = localStorage.getItem("spendx-settings");
 
       if (savedSettings) {
-        const parsed = JSON.parse(savedSettings);
+        try {
+          const parsed = JSON.parse(savedSettings);
 
-        setEmailAlerts(parsed.emailAlerts ?? true);
-        setPushAlerts(parsed.pushAlerts ?? false);
-        setSmsAlerts(parsed.smsAlerts ?? false);
-        setTwoFactor(parsed.twoFactor ?? false);
-        setBiometricLock(parsed.biometricLock ?? false);
-        setCurrency(parsed.currency ?? "INR");
-        setLanguage(parsed.language ?? "English");
-        setPaymentConnected(parsed.paymentConnected ?? false);
+          setEmailAlerts(parsed.emailAlerts ?? true);
+          setPushAlerts(parsed.pushAlerts ?? false);
+          setSmsAlerts(parsed.smsAlerts ?? false);
+          setTwoFactor(parsed.twoFactor ?? false);
+          setBiometricLock(parsed.biometricLock ?? false);
+          setLanguage(parsed.language ?? "English");
+          setPaymentConnected(parsed.paymentConnected ?? false);
+        } catch (parseError) {
+          console.error(
+            "Parse saved settings error:",
+            parseError
+          );
+        }
+      }
+
+      /*
+       * Load the user's currency from profiles.
+       */
+      const {
+        data: profileSettings,
+        error: profileError,
+      } = await supabase
+        .from("profiles")
+        .select("currency")
+        .eq("id", user.id)
+        .maybeSingle();
+
+      if (profileError) {
+        console.error("Load currency error:", profileError);
+      } else if (profileSettings?.currency) {
+        const savedCurrency =
+          profileSettings.currency as CurrencyCode;
+
+        /*
+         * Only accept currencies supported by the application.
+         */
+        const isValidCurrency = currencies.some(
+          (item) => item.code === savedCurrency
+        );
+
+        if (isValidCurrency) {
+          setCurrency(savedCurrency);
+        } else {
+          setCurrency("INR");
+        }
+      } else {
+        setCurrency("INR");
       }
     } catch (error) {
       console.error("Load settings error:", error);
-      setErrorMessage("Something went wrong while loading settings.");
+
+      if (error instanceof Error) {
+        setErrorMessage(error.message);
+      } else {
+        setErrorMessage(
+          "Something went wrong while loading settings."
+        );
+      }
     } finally {
       setLoading(false);
     }
   }
 
-  async function handleSaveProfile(event: FormEvent<HTMLFormElement>) {
+  async function handleSaveProfile(
+    event: FormEvent<HTMLFormElement>
+  ) {
     event.preventDefault();
 
     if (!profile) {
@@ -304,19 +383,104 @@ export default function Settings() {
       if (error instanceof Error) {
         setErrorMessage(error.message);
       } else {
-        setErrorMessage("Something went wrong while saving profile.");
+        setErrorMessage(
+          "Something went wrong while saving profile."
+        );
       }
     } finally {
       setSavingProfile(false);
     }
   }
 
-  function savePreferences() {
+  /*
+   * Save all preferences.
+   *
+   * IMPORTANT:
+   * - Currency is saved in profiles.currency.
+   * - Transaction amounts are never converted.
+   * - upsert handles both existing and missing profile rows.
+   */
+  async function savePreferences() {
     try {
       setSavingPreferences(true);
       setMessage("");
       setErrorMessage("");
 
+      /*
+       * Get the current authenticated user using the existing
+       * SpendX Supabase client.
+       */
+      const {
+        data: { user },
+        error: userError,
+      } = await supabase.auth.getUser();
+
+      if (userError) {
+        console.error(
+          "Get authenticated user error:",
+          userError
+        );
+
+        throw new Error(userError.message);
+      }
+
+      if (!user) {
+        /*
+         * Try to get the session as an additional check.
+         */
+        const {
+          data: { session },
+        } = await supabase.auth.getSession();
+
+        if (!session?.user) {
+          throw new Error(
+            "You must be logged in to save preferences."
+          );
+        }
+      }
+
+      /*
+       * Use the authenticated user's ID.
+       */
+      const authenticatedUser = user;
+
+      if (!authenticatedUser) {
+        throw new Error(
+          "Unable to determine the authenticated user."
+        );
+      }
+
+      /*
+       * Save the selected currency.
+       *
+       * upsert:
+       * - updates the row if it exists
+       * - creates the row if it doesn't exist
+       */
+      const { error: currencyError } = await supabase
+        .from("profiles")
+        .upsert(
+          {
+            id: authenticatedUser.id,
+            currency: currency,
+          },
+          {
+            onConflict: "id",
+          }
+        );
+
+      if (currencyError) {
+        console.error(
+          "Save currency error:",
+          currencyError
+        );
+
+        throw new Error(currencyError.message);
+      }
+
+      /*
+       * Save the other UI preferences locally.
+       */
       localStorage.setItem(
         "spendx-settings",
         JSON.stringify({
@@ -325,16 +489,27 @@ export default function Settings() {
           smsAlerts,
           twoFactor,
           biometricLock,
-          currency,
           language,
           paymentConnected,
         })
       );
 
-      setMessage("Settings saved successfully.");
+      setMessage(
+        `Localization settings saved successfully. Currency: ${currency}`
+      );
     } catch (error) {
-      console.error("Save preferences error:", error);
-      setErrorMessage("Something went wrong while saving preferences.");
+      console.error(
+        "Save preferences error:",
+        error
+      );
+
+      if (error instanceof Error) {
+        setErrorMessage(error.message);
+      } else {
+        setErrorMessage(
+          "Something went wrong while saving preferences."
+        );
+      }
     } finally {
       setSavingPreferences(false);
     }
@@ -359,7 +534,9 @@ export default function Settings() {
       if (error instanceof Error) {
         setErrorMessage(error.message);
       } else {
-        setErrorMessage("Something went wrong while signing out.");
+        setErrorMessage(
+          "Something went wrong while signing out."
+        );
       }
     } finally {
       setSigningOut(false);
@@ -372,18 +549,23 @@ export default function Settings() {
     }, 0);
 
     return () => window.clearTimeout(timer);
-    // Existing page load routine is intentionally run once on mount.
+
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const initials = useMemo(() => {
-    const name = profile?.full_name || profile?.email || "User";
+    const name =
+      profile?.full_name ||
+      profile?.email ||
+      "User";
 
     return name
       .split(" ")
       .filter(Boolean)
       .slice(0, 2)
-      .map((part) => part[0]?.toUpperCase())
+      .map((part) =>
+        part[0]?.toUpperCase()
+      )
       .join("");
   }, [profile]);
 
@@ -399,8 +581,8 @@ export default function Settings() {
             </h1>
 
             <p className="mt-2 sx-muted">
-              Configure SpendX preferences, security, profile, and account
-              controls.
+              Configure SpendX preferences, security,
+              profile, and account controls.
             </p>
           </div>
 
@@ -434,493 +616,681 @@ export default function Settings() {
 
           {loading ? (
             <div className="sx-card flex items-center justify-center rounded-2xl py-20 sx-muted">
-              <Loader2 size={20} className="mr-2 animate-spin" />
+              <Loader2
+                size={20}
+                className="mr-2 animate-spin"
+              />
               Loading settings...
             </div>
           ) : (
             <div className="mx-auto max-w-2xl space-y-8">
-                <div className="sx-card rounded-2xl p-6">
-                  <div className="flex items-center gap-4">
-                    {profile?.avatar_url ? (
-                      // eslint-disable-next-line @next/next/no-img-element
-                      <img
-                        src={profile.avatar_url}
-                        alt="Profile avatar"
-                        className="h-16 w-16 rounded-full border border-border object-cover"
-                      />
-                    ) : (
-                      <div className="flex h-16 w-16 items-center justify-center rounded-full border border-white/10 bg-gradient-to-tr from-indigo-500 to-purple-600 text-xl font-bold text-white">
-                        {initials || "U"}
-                      </div>
-                    )}
-
-                    <div>
-                      <h3 className="text-lg font-bold sx-title">
-                        {profile?.full_name || "User"}
-                      </h3>
-
-                      <p className="mt-1 text-xs sx-muted">
-                        {profile?.email || "No email found"}
-                      </p>
-
-                      <span className="mt-2 inline-block rounded-full border border-emerald-500/20 bg-emerald-500/10 px-2.5 py-0.5 font-mono text-[9px] font-semibold uppercase tracking-wider text-emerald-400">
-                        Auth Connected
-                      </span>
+              {/* PROFILE SUMMARY */}
+              <div className="sx-card rounded-2xl p-6">
+                <div className="flex items-center gap-4">
+                  {profile?.avatar_url ? (
+                    // eslint-disable-next-line @next/next/no-img-element
+                    <img
+                      src={profile.avatar_url}
+                      alt="Profile avatar"
+                      className="h-16 w-16 rounded-full border border-border object-cover"
+                    />
+                  ) : (
+                    <div className="flex h-16 w-16 items-center justify-center rounded-full border border-white/10 bg-gradient-to-tr from-indigo-500 to-purple-600 text-xl font-bold text-white">
+                      {initials || "U"}
                     </div>
-                  </div>
+                  )}
 
-                  <button
-                    type="button"
-                    onClick={handleSignOut}
-                    disabled={signingOut}
-                    className="mt-6 flex w-full items-center justify-center gap-2 rounded-2xl border border-red-500/20 bg-red-500/10 px-5 py-3 text-sm font-semibold text-red-300 transition-colors hover:border-red-500/30 disabled:cursor-not-allowed disabled:opacity-60"
-                  >
-                    {signingOut ? (
-                      <>
-                        <Loader2 size={16} className="animate-spin" />
-                        Signing out
-                      </>
-                    ) : (
-                      <>
-                        <LogOut size={16} />
-                        Sign out
-                      </>
-                    )}
-                  </button>
-                </div>
-
-                {sections.map((section) => (
-                  <div key={section.title} className="space-y-4">
-                    <h3 className="ml-1 font-mono text-xs font-bold uppercase tracking-widest sx-muted">
-                      {section.title}
+                  <div>
+                    <h3 className="text-lg font-bold sx-title">
+                      {profile?.full_name || "User"}
                     </h3>
 
-                    <div className="sx-card overflow-hidden rounded-2xl">
-                      {section.items.map((item) => {
-                        const Icon = item.icon;
-                        const isExpanded = expandedItems.has(item.id);
+                    <p className="mt-1 text-xs sx-muted">
+                      {profile?.email ||
+                        "No email found"}
+                    </p>
 
-                        return (
-                          <div key={item.id}>
-                            <button
-                              type="button"
-                              onClick={() => toggleExpanded(item.id)}
-                              className={`flex w-full items-center justify-between border-b border-border/60 p-5 text-left transition-colors last:border-b-0 ${isExpanded ? "bg-primary/10" : "hover:bg-primary/5"
-                                }`}
-                            >
-                              <div className="flex items-center gap-4">
-                                <div
-                                  className={`rounded-2xl border p-3 transition-colors ${isExpanded
-                                      ? "border-indigo-500/30 bg-indigo-500/10 text-indigo-300"
-                                      : "border-border bg-muted/60 text-muted-foreground"
-                                    }`}
-                                >
-                                  <Icon size={18} />
-                                </div>
+                    <span className="mt-2 inline-block rounded-full border border-emerald-500/20 bg-emerald-500/10 px-2.5 py-0.5 font-mono text-[9px] font-semibold uppercase tracking-wider text-emerald-400">
+                      Auth Connected
+                    </span>
+                  </div>
+                </div>
 
-                                <div>
-                                  <h4 className="text-sm font-bold sx-title">
-                                    {item.name}
-                                  </h4>
+                <button
+                  type="button"
+                  onClick={handleSignOut}
+                  disabled={signingOut}
+                  className="mt-6 flex w-full items-center justify-center gap-2 rounded-2xl border border-red-500/20 bg-red-500/10 px-5 py-3 text-sm font-semibold text-red-300 transition-colors hover:border-red-500/30 disabled:cursor-not-allowed disabled:opacity-60"
+                >
+                  {signingOut ? (
+                    <>
+                      <Loader2
+                        size={16}
+                        className="animate-spin"
+                      />
+                      Signing out
+                    </>
+                  ) : (
+                    <>
+                      <LogOut size={16} />
+                      Sign out
+                    </>
+                  )}
+                </button>
+              </div>
 
-                                  <p className="mt-0.5 text-xs sx-muted">
-                                    {item.desc}
-                                  </p>
-                                </div>
+              {/* SETTINGS SECTIONS */}
+              {sections.map((section) => (
+                <div
+                  key={section.title}
+                  className="space-y-4"
+                >
+                  <h3 className="ml-1 font-mono text-xs font-bold uppercase tracking-widest sx-muted">
+                    {section.title}
+                  </h3>
+
+                  <div className="sx-card overflow-hidden rounded-2xl">
+                    {section.items.map((item) => {
+                      const Icon = item.icon;
+                      const isExpanded =
+                        expandedItems.has(item.id);
+
+                      return (
+                        <div key={item.id}>
+                          <button
+                            type="button"
+                            onClick={() =>
+                              toggleExpanded(item.id)
+                            }
+                            className={`flex w-full items-center justify-between border-b border-border/60 p-5 text-left transition-colors last:border-b-0 ${isExpanded
+                                ? "bg-primary/10"
+                                : "hover:bg-primary/5"
+                              }`}
+                          >
+                            <div className="flex items-center gap-4">
+                              <div
+                                className={`rounded-2xl border p-3 transition-colors ${isExpanded
+                                    ? "border-indigo-500/30 bg-indigo-500/10 text-indigo-300"
+                                    : "border-border bg-muted/60 text-muted-foreground"
+                                  }`}
+                              >
+                                <Icon size={18} />
                               </div>
 
-                              <ChevronDown
-                                size={16}
-                                className={`transition-transform ${isExpanded
-                                    ? "rotate-180 text-primary"
-                                    : "text-muted-foreground"
-                                  }`}
-                              />
-                            </button>
+                              <div>
+                                <h4 className="text-sm font-bold sx-title">
+                                  {item.name}
+                                </h4>
 
-                            {isExpanded && (
-                              <div className="border-b border-border/60 bg-primary/5 p-6">
-                                {item.id === "profile" && (
-                                  <form onSubmit={handleSaveProfile} className="space-y-6">
-                                    <div>
-                                      <h2 className="font-mono text-xl font-bold sx-title">
-                                        Personal Profile
-                                      </h2>
+                                <p className="mt-0.5 text-xs sx-muted">
+                                  {item.desc}
+                                </p>
+                              </div>
+                            </div>
 
-                                      <p className="mt-2 text-sm sx-muted">
-                                        Update the name shown across your SpendX dashboard.
-                                      </p>
-                                    </div>
+                            <ChevronDown
+                              size={16}
+                              className={`transition-transform ${isExpanded
+                                  ? "rotate-180 text-primary"
+                                  : "text-muted-foreground"
+                                }`}
+                            />
+                          </button>
 
-                                    <div>
-                                      <label className="mb-2 block font-mono text-xs sx-muted">
-                                        Display Name
-                                      </label>
+                          {isExpanded && (
+                            <div className="border-b border-border/60 bg-primary/5 p-6">
+                              {/* PROFILE */}
+                              {item.id === "profile" && (
+                                <form
+                                  onSubmit={
+                                    handleSaveProfile
+                                  }
+                                  className="space-y-6"
+                                >
+                                  <div>
+                                    <h2 className="font-mono text-xl font-bold sx-title">
+                                      Personal Profile
+                                    </h2>
 
-                                      <input
-                                        type="text"
-                                        value={displayName}
-                                        onChange={(event) =>
-                                          setDisplayName(event.target.value)
-                                        }
-                                        placeholder="Enter your display name"
-                                        className="sx-field w-full rounded-xl px-4 py-3 text-sm placeholder:text-muted-foreground"
-                                      />
-                                    </div>
+                                    <p className="mt-2 text-sm sx-muted">
+                                      Update the name shown
+                                      across your SpendX
+                                      dashboard.
+                                    </p>
+                                  </div>
 
-                                    <div>
-                                      <label className="mb-2 block font-mono text-xs sx-muted">
-                                        Email Address
-                                      </label>
+                                  <div>
+                                    <label className="mb-2 block font-mono text-xs sx-muted">
+                                      Display Name
+                                    </label>
 
-                                      <input
-                                        type="email"
-                                        value={profile?.email || ""}
-                                        disabled
-                                        className="sx-field w-full cursor-not-allowed rounded-xl px-4 py-3 text-sm opacity-70"
-                                      />
-                                    </div>
+                                    <input
+                                      type="text"
+                                      value={displayName}
+                                      onChange={(event) =>
+                                        setDisplayName(
+                                          event.target
+                                            .value
+                                        )
+                                      }
+                                      placeholder="Enter your display name"
+                                      className="sx-field w-full rounded-xl px-4 py-3 text-sm placeholder:text-muted-foreground"
+                                    />
+                                  </div>
 
-                                    <button
-                                      type="submit"
-                                      disabled={savingProfile}
-                                      className="sx-primary-button flex items-center justify-center gap-2 rounded-xl px-5 py-3 text-sm font-bold transition-transform hover:-translate-y-0.5 disabled:cursor-not-allowed disabled:opacity-60"
-                                    >
-                                      {savingProfile ? (
-                                        <>
-                                          <Loader2 size={16} className="animate-spin" />
-                                          Saving
-                                        </>
-                                      ) : (
-                                        <>
-                                          <Save size={16} />
-                                          Save Profile
-                                        </>
-                                      )}
-                                    </button>
-                                  </form>
-                                )}
+                                  <div>
+                                    <label className="mb-2 block font-mono text-xs sx-muted">
+                                      Email Address
+                                    </label>
 
-                                {item.id === "payments" && (
-                                  <div className="space-y-6">
-                                    <div>
-                                      <h2 className="font-mono text-xl font-bold sx-title">
-                                        Payment Portals
-                                      </h2>
+                                    <input
+                                      type="email"
+                                      value={
+                                        profile?.email ||
+                                        ""
+                                      }
+                                      disabled
+                                      className="sx-field w-full cursor-not-allowed rounded-xl px-4 py-3 text-sm opacity-70"
+                                    />
+                                  </div>
 
-                                      <p className="mt-2 text-sm sx-muted">
-                                        Simulate linking a payment account for now.
-                                      </p>
-                                    </div>
+                                  <button
+                                    type="submit"
+                                    disabled={
+                                      savingProfile
+                                    }
+                                    className="sx-primary-button flex items-center justify-center gap-2 rounded-xl px-5 py-3 text-sm font-bold transition-transform hover:-translate-y-0.5 disabled:cursor-not-allowed disabled:opacity-60"
+                                  >
+                                    {savingProfile ? (
+                                      <>
+                                        <Loader2
+                                          size={16}
+                                          className="animate-spin"
+                                        />
+                                        Saving
+                                      </>
+                                    ) : (
+                                      <>
+                                        <Save size={16} />
+                                        Save Profile
+                                      </>
+                                    )}
+                                  </button>
+                                </form>
+                              )}
 
-                                    <div className="sx-panel rounded-xl p-5">
-                                      <div className="flex items-center justify-between gap-4">
-                                        <div>
-                                          <h3 className="text-sm font-bold sx-title">
-                                            Bank/Card Connection
-                                          </h3>
+                              {/* PAYMENTS */}
+                              {item.id === "payments" && (
+                                <div className="space-y-6">
+                                  <div>
+                                    <h2 className="font-mono text-xl font-bold sx-title">
+                                      Payment Portals
+                                    </h2>
 
-                                          <p className="mt-1 text-xs sx-muted">
-                                            {paymentConnected
-                                              ? "A payment portal is currently marked as connected."
-                                              : "No payment portal connected yet."}
-                                          </p>
-                                        </div>
+                                    <p className="mt-2 text-sm sx-muted">
+                                      Simulate linking a
+                                      payment account for
+                                      now.
+                                    </p>
+                                  </div>
 
-                                        <span
-                                          className={`rounded-full px-3 py-1 text-xs font-semibold ${paymentConnected
-                                              ? "bg-emerald-500/10 text-emerald-300"
-                                              : "bg-muted text-muted-foreground"
-                                            }`}
-                                        >
-                                          {paymentConnected ? "Connected" : "Not connected"}
-                                        </span>
+                                  <div className="sx-panel rounded-xl p-5">
+                                    <div className="flex items-center justify-between gap-4">
+                                      <div>
+                                        <h3 className="text-sm font-bold sx-title">
+                                          Bank/Card Connection
+                                        </h3>
+
+                                        <p className="mt-1 text-xs sx-muted">
+                                          {paymentConnected
+                                            ? "A payment portal is currently marked as connected."
+                                            : "No payment portal connected yet."}
+                                        </p>
                                       </div>
 
-                                      <button
-                                        type="button"
-                                        onClick={() =>
-                                          setPaymentConnected((current) => !current)
-                                        }
-                                        className="sx-primary-button mt-5 rounded-xl px-5 py-3 text-sm font-bold transition-transform hover:-translate-y-0.5"
+                                      <span
+                                        className={`rounded-full px-3 py-1 text-xs font-semibold ${paymentConnected
+                                            ? "bg-emerald-500/10 text-emerald-300"
+                                            : "bg-muted text-muted-foreground"
+                                          }`}
                                       >
                                         {paymentConnected
-                                          ? "Disconnect Portal"
-                                          : "Connect Portal"}
-                                      </button>
+                                          ? "Connected"
+                                          : "Not connected"}
+                                      </span>
                                     </div>
 
                                     <button
                                       type="button"
-                                      onClick={savePreferences}
-                                      className="sx-secondary-button flex items-center gap-2 rounded-xl px-5 py-3 text-sm font-semibold"
+                                      onClick={() =>
+                                        setPaymentConnected(
+                                          (current) =>
+                                            !current
+                                        )
+                                      }
+                                      className="sx-primary-button mt-5 rounded-xl px-5 py-3 text-sm font-bold transition-transform hover:-translate-y-0.5"
                                     >
+                                      {paymentConnected
+                                        ? "Disconnect Portal"
+                                        : "Connect Portal"}
+                                    </button>
+                                  </div>
+
+                                  <button
+                                    type="button"
+                                    onClick={
+                                      savePreferences
+                                    }
+                                    disabled={
+                                      savingPreferences
+                                    }
+                                    className="sx-secondary-button flex items-center gap-2 rounded-xl px-5 py-3 text-sm font-semibold disabled:opacity-60"
+                                  >
+                                    {savingPreferences ? (
+                                      <Loader2
+                                        size={16}
+                                        className="animate-spin"
+                                      />
+                                    ) : (
                                       <Save size={16} />
-                                      Save Payment Settings
-                                    </button>
+                                    )}
+                                    Save Payment Settings
+                                  </button>
+                                </div>
+                              )}
+
+                              {/* ALERTS */}
+                              {item.id === "alerts" && (
+                                <div className="space-y-6">
+                                  <div>
+                                    <h2 className="font-mono text-xl font-bold sx-title">
+                                      Visual Alerts
+                                    </h2>
+
+                                    <p className="mt-2 text-sm sx-muted">
+                                      Choose how SpendX
+                                      should notify you.
+                                    </p>
                                   </div>
-                                )}
 
-                                {item.id === "alerts" && (
-                                  <div className="space-y-6">
-                                    <div>
-                                      <h2 className="font-mono text-xl font-bold sx-title">
-                                        Visual Alerts
-                                      </h2>
+                                  <div className="space-y-4">
+                                    <div className="sx-panel flex items-center justify-between gap-4 rounded-xl p-5">
+                                      <div className="min-w-0">
+                                        <h3 className="text-sm font-bold sx-title">
+                                          Email Alerts
+                                        </h3>
 
-                                      <p className="mt-2 text-sm sx-muted">
-                                        Choose how SpendX should notify you.
-                                      </p>
+                                        <p className="mt-1 text-xs sx-muted">
+                                          Receive transaction
+                                          and report alerts
+                                          by email.
+                                        </p>
+                                      </div>
+
+                                      <SettingToggle
+                                        checked={
+                                          emailAlerts
+                                        }
+                                        onChange={() =>
+                                          setEmailAlerts(
+                                            (current) =>
+                                              !current
+                                          )
+                                        }
+                                      />
                                     </div>
 
-                                    <div className="space-y-4">
-                                      <div className="sx-panel flex items-center justify-between gap-4 rounded-xl p-5">
-                                        <div className="min-w-0">
-                                          <h3 className="text-sm font-bold sx-title">
-                                            Email Alerts
-                                          </h3>
-                                          <p className="mt-1 text-xs sx-muted">
-                                            Receive transaction and report alerts by email.
-                                          </p>
-                                        </div>
+                                    <div className="sx-panel flex items-center justify-between gap-4 rounded-xl p-5">
+                                      <div className="min-w-0">
+                                        <h3 className="text-sm font-bold sx-title">
+                                          Push Alerts
+                                        </h3>
 
-                                        <SettingToggle
-                                          checked={emailAlerts}
-                                          onChange={() =>
-                                            setEmailAlerts((current) => !current)
-                                          }
-                                        />
+                                        <p className="mt-1 text-xs sx-muted">
+                                          Enable app-style
+                                          visual
+                                          notifications.
+                                        </p>
                                       </div>
 
-                                      <div className="sx-panel flex items-center justify-between gap-4 rounded-xl p-5">
-                                        <div className="min-w-0">
-                                          <h3 className="text-sm font-bold sx-title">
-                                            Push Alerts
-                                          </h3>
-                                          <p className="mt-1 text-xs sx-muted">
-                                            Enable app-style visual notifications.
-                                          </p>
-                                        </div>
-
-                                        <SettingToggle
-                                          checked={pushAlerts}
-                                          onChange={() =>
-                                            setPushAlerts((current) => !current)
-                                          }
-                                        />
-                                      </div>
-
-                                      <div className="sx-panel flex items-center justify-between gap-4 rounded-xl p-5">
-                                        <div className="min-w-0">
-                                          <h3 className="text-sm font-bold sx-title">
-                                            SMS Alerts
-                                          </h3>
-                                          <p className="mt-1 text-xs sx-muted">
-                                            Receive important alerts by phone message.
-                                          </p>
-                                        </div>
-
-                                        <SettingToggle
-                                          checked={smsAlerts}
-                                          onChange={() => setSmsAlerts((current) => !current)}
-                                        />
-                                      </div>
+                                      <SettingToggle
+                                        checked={
+                                          pushAlerts
+                                        }
+                                        onChange={() =>
+                                          setPushAlerts(
+                                            (current) =>
+                                              !current
+                                          )
+                                        }
+                                      />
                                     </div>
 
-                                    <button
-                                      type="button"
-                                      onClick={savePreferences}
-                                      disabled={savingPreferences}
-                                      className="sx-primary-button flex items-center gap-2 rounded-xl px-5 py-3 text-sm font-bold transition-transform hover:-translate-y-0.5 disabled:opacity-60"
+                                    <div className="sx-panel flex items-center justify-between gap-4 rounded-xl p-5">
+                                      <div className="min-w-0">
+                                        <h3 className="text-sm font-bold sx-title">
+                                          SMS Alerts
+                                        </h3>
+
+                                        <p className="mt-1 text-xs sx-muted">
+                                          Receive important
+                                          alerts by phone
+                                          message.
+                                        </p>
+                                      </div>
+
+                                      <SettingToggle
+                                        checked={
+                                          smsAlerts
+                                        }
+                                        onChange={() =>
+                                          setSmsAlerts(
+                                            (current) =>
+                                              !current
+                                          )
+                                        }
+                                      />
+                                    </div>
+                                  </div>
+
+                                  <button
+                                    type="button"
+                                    onClick={
+                                      savePreferences
+                                    }
+                                    disabled={
+                                      savingPreferences
+                                    }
+                                    className="sx-primary-button flex items-center gap-2 rounded-xl px-5 py-3 text-sm font-bold transition-transform hover:-translate-y-0.5 disabled:opacity-60"
+                                  >
+                                    {savingPreferences ? (
+                                      <Loader2
+                                        size={16}
+                                        className="animate-spin"
+                                      />
+                                    ) : (
+                                      <Save size={16} />
+                                    )}
+                                    Save Alert Settings
+                                  </button>
+                                </div>
+                              )}
+
+                              {/* SECURITY */}
+                              {item.id === "security" && (
+                                <div className="space-y-6">
+                                  <div>
+                                    <h2 className="font-mono text-xl font-bold sx-title">
+                                      Security Protocols
+                                    </h2>
+
+                                    <p className="mt-2 text-sm sx-muted">
+                                      Control security
+                                      preferences for your
+                                      account.
+                                    </p>
+                                  </div>
+
+                                  <div className="space-y-4">
+                                    <div className="sx-panel flex items-center justify-between gap-4 rounded-xl p-5">
+                                      <div className="min-w-0">
+                                        <h3 className="text-sm font-bold sx-title">
+                                          Two-Factor
+                                          Authentication
+                                        </h3>
+
+                                        <p className="mt-1 text-xs sx-muted">
+                                          This stores the
+                                          preference for now.
+                                          Real 2FA can be
+                                          connected later.
+                                        </p>
+                                      </div>
+
+                                      <SettingToggle
+                                        checked={
+                                          twoFactor
+                                        }
+                                        onChange={() =>
+                                          setTwoFactor(
+                                            (current) =>
+                                              !current
+                                          )
+                                        }
+                                      />
+                                    </div>
+
+                                    <div className="sx-panel flex items-center justify-between gap-4 rounded-xl p-5">
+                                      <div className="min-w-0">
+                                        <h3 className="text-sm font-bold sx-title">
+                                          Biometric Lock
+                                        </h3>
+
+                                        <p className="mt-1 text-xs sx-muted">
+                                          Save biometric
+                                          lock preference
+                                          for supported
+                                          devices later.
+                                        </p>
+                                      </div>
+
+                                      <SettingToggle
+                                        checked={
+                                          biometricLock
+                                        }
+                                        onChange={() =>
+                                          setBiometricLock(
+                                            (current) =>
+                                              !current
+                                          )
+                                        }
+                                      />
+                                    </div>
+                                  </div>
+
+                                  <button
+                                    type="button"
+                                    onClick={
+                                      savePreferences
+                                    }
+                                    disabled={
+                                      savingPreferences
+                                    }
+                                    className="sx-primary-button flex items-center gap-2 rounded-xl px-5 py-3 text-sm font-bold transition-transform hover:-translate-y-0.5 disabled:opacity-60"
+                                  >
+                                    {savingPreferences ? (
+                                      <Loader2
+                                        size={16}
+                                        className="animate-spin"
+                                      />
+                                    ) : (
+                                      <Shield size={16} />
+                                    )}
+                                    Save Security Settings
+                                  </button>
+                                </div>
+                              )}
+
+                              {/* LOCALIZATION */}
+                              {item.id === "localization" && (
+                                <div className="space-y-6">
+                                  <div>
+                                    <h2 className="font-mono text-xl font-bold sx-title">
+                                      Localization
+                                    </h2>
+
+                                    <p className="mt-2 text-sm sx-muted">
+                                      Choose your preferred
+                                      currency and language.
+                                    </p>
+                                  </div>
+
+                                  <div>
+                                    <label className="mb-2 block font-mono text-xs sx-muted">
+                                      Currency
+                                    </label>
+
+                                    <select
+                                      value={currency}
+                                      onChange={(event) =>
+                                        setCurrency(
+                                          event.target
+                                            .value as CurrencyCode
+                                        )
+                                      }
+                                      className="sx-field w-full rounded-xl px-4 py-3 text-sm"
                                     >
-                                      {savingPreferences ? (
-                                        <Loader2 size={16} className="animate-spin" />
-                                      ) : (
-                                        <Save size={16} />
+                                      {currencies.map(
+                                        (item) => (
+                                          <option
+                                            key={
+                                              item.code
+                                            }
+                                            value={
+                                              item.code
+                                            }
+                                          >
+                                            {item.code} —{" "}
+                                            {item.name}
+                                          </option>
+                                        )
                                       )}
-                                      Save Alert Settings
-                                    </button>
+                                    </select>
                                   </div>
-                                )}
 
-                                {item.id === "security" && (
-                                  <div className="space-y-6">
-                                    <div>
-                                      <h2 className="font-mono text-xl font-bold sx-title">
-                                        Security Protocols
-                                      </h2>
+                                  <div>
+                                    <label className="mb-2 block font-mono text-xs sx-muted">
+                                      Language
+                                    </label>
 
-                                      <p className="mt-2 text-sm sx-muted">
-                                        Control security preferences for your account.
-                                      </p>
-                                    </div>
+                                    <select
+                                      value={language}
+                                      onChange={(event) =>
+                                        setLanguage(
+                                          event.target
+                                            .value
+                                        )
+                                      }
+                                      className="sx-field w-full rounded-xl px-4 py-3 text-sm"
+                                    >
+                                      <option value="English">
+                                        English
+                                      </option>
+                                      <option value="Hindi">
+                                        Hindi
+                                      </option>
+                                      <option value="Malayalam">
+                                        Malayalam
+                                      </option>
+                                      <option value="Tamil">
+                                        Tamil
+                                      </option>
+                                    </select>
+                                  </div>
 
-                                    <div className="space-y-4">
-                                      <div className="sx-panel flex items-center justify-between gap-4 rounded-xl p-5">
-                                        <div className="min-w-0">
-                                          <h3 className="text-sm font-bold sx-title">
-                                            Two-Factor Authentication
-                                          </h3>
+                                  <div className="sx-panel rounded-xl p-4">
+                                    <div className="flex items-center justify-between gap-4">
+                                      <div>
+                                        <p className="text-xs sx-muted">
+                                          Current currency
+                                        </p>
 
-                                          <p className="mt-1 text-xs sx-muted">
-                                            This stores the preference for now. Real 2FA can be
-                                            connected later.
-                                          </p>
-                                        </div>
-
-                                        <SettingToggle
-                                          checked={twoFactor}
-                                          onChange={() => setTwoFactor((current) => !current)}
-                                        />
+                                        <p className="mt-1 font-mono text-lg font-bold sx-title">
+                                          {currency}
+                                        </p>
                                       </div>
 
-                                      <div className="sx-panel flex items-center justify-between gap-4 rounded-xl p-5">
-                                        <div className="min-w-0">
-                                          <h3 className="text-sm font-bold sx-title">
-                                            Biometric Lock
-                                          </h3>
-
-                                          <p className="mt-1 text-xs sx-muted">
-                                            Save biometric lock preference for supported
-                                            devices later.
-                                          </p>
-                                        </div>
-
-                                        <SettingToggle
-                                          checked={biometricLock}
-                                          onChange={() =>
-                                            setBiometricLock((current) => !current)
-                                          }
-                                        />
-                                      </div>
+                                      <span className="rounded-full border border-emerald-500/20 bg-emerald-500/10 px-3 py-1 text-xs font-semibold text-emerald-300">
+                                        Ready
+                                      </span>
                                     </div>
-
-                                    <button
-                                      type="button"
-                                      onClick={savePreferences}
-                                      disabled={savingPreferences}
-                                      className="sx-primary-button flex items-center gap-2 rounded-xl px-5 py-3 text-sm font-bold transition-transform hover:-translate-y-0.5 disabled:opacity-60"
-                                    >
-                                      {savingPreferences ? (
-                                        <Loader2 size={16} className="animate-spin" />
-                                      ) : (
-                                        <Shield size={16} />
-                                      )}
-                                      Save Security Settings
-                                    </button>
                                   </div>
-                                )}
 
-                                {item.id === "localization" && (
-                                  <div className="space-y-6">
-                                    <div>
-                                      <h2 className="font-mono text-xl font-bold sx-title">
-                                        Localization
-                                      </h2>
-
-                                      <p className="mt-2 text-sm sx-muted">
-                                        Choose your preferred currency and language.
-                                      </p>
-                                    </div>
-
-                                    <div>
-                                      <label className="mb-2 block font-mono text-xs sx-muted">
-                                        Currency
-                                      </label>
-
-                                      <select
-                                        value={currency}
-                                        onChange={(event) => setCurrency(event.target.value)}
-                                        className="sx-field w-full rounded-xl px-4 py-3 text-sm"
-                                      >
-                                        <option value="INR">INR — Indian Rupee</option>
-                                        <option value="USD">USD — US Dollar</option>
-                                        <option value="EUR">EUR — Euro</option>
-                                        <option value="GBP">GBP — British Pound</option>
-                                      </select>
-                                    </div>
-
-                                    <div>
-                                      <label className="mb-2 block font-mono text-xs sx-muted">
-                                        Language
-                                      </label>
-
-                                      <select
-                                        value={language}
-                                        onChange={(event) => setLanguage(event.target.value)}
-                                        className="sx-field w-full rounded-xl px-4 py-3 text-sm"
-                                      >
-                                        <option value="English">English</option>
-                                        <option value="Hindi">Hindi</option>
-                                        <option value="Malayalam">Malayalam</option>
-                                        <option value="Tamil">Tamil</option>
-                                      </select>
-                                    </div>
-
-                                    <button
-                                      type="button"
-                                      onClick={savePreferences}
-                                      disabled={savingPreferences}
-                                      className="sx-primary-button flex items-center gap-2 rounded-xl px-5 py-3 text-sm font-bold transition-transform hover:-translate-y-0.5 disabled:opacity-60"
-                                    >
-                                      {savingPreferences ? (
-                                        <Loader2 size={16} className="animate-spin" />
-                                      ) : (
+                                  <button
+                                    type="button"
+                                    onClick={
+                                      savePreferences
+                                    }
+                                    disabled={
+                                      savingPreferences
+                                    }
+                                    className="sx-primary-button flex items-center gap-2 rounded-xl px-5 py-3 text-sm font-bold transition-transform hover:-translate-y-0.5 disabled:cursor-not-allowed disabled:opacity-60"
+                                  >
+                                    {savingPreferences ? (
+                                      <>
+                                        <Loader2
+                                          size={16}
+                                          className="animate-spin"
+                                        />
+                                        Saving...
+                                      </>
+                                    ) : (
+                                      <>
                                         <Check size={16} />
-                                      )}
-                                      Save Localization
-                                    </button>
+                                        Save Localization
+                                      </>
+                                    )}
+                                  </button>
+                                </div>
+                              )}
+
+                              {/* APPEARANCE */}
+                              {item.id === "appearance" && (
+                                <div className="space-y-6">
+                                  <div>
+                                    <h2 className="font-mono text-xl font-bold sx-title">
+                                      Appearance
+                                    </h2>
+
+                                    <p className="mt-2 text-sm sx-muted">
+                                      Choose the workspace
+                                      theme that feels
+                                      best for your finance
+                                      review sessions.
+                                    </p>
                                   </div>
-                                )}
 
-                                {item.id === "appearance" && (
-                                  <div className="space-y-6">
-                                    <div>
-                                      <h2 className="font-mono text-xl font-bold sx-title">
-                                        Appearance
-                                      </h2>
-
-                                      <p className="mt-2 text-sm sx-muted">
-                                        Choose the workspace theme that feels best for your
-                                        finance review sessions.
-                                      </p>
-                                    </div>
-
-                                    <div className="sx-panel flex flex-col gap-5 rounded-xl p-5 sm:flex-row sm:items-center sm:justify-between">
-                                      <div className="flex min-w-0 items-center gap-4">
-                                        <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl border border-primary/20 bg-primary/10 text-primary">
-                                          {theme === "dark" ? (
-                                            <Moon size={20} />
-                                          ) : (
-                                            <Sun size={20} />
-                                          )}
-                                        </div>
-
-                                        <div className="min-w-0">
-                                          <h3 className="text-sm font-bold sx-title">
-                                            {theme === "dark" ? "Dark Mode" : "Light Mode"}
-                                          </h3>
-
-                                          <p className="mt-1 text-xs sx-muted">
-                                            Slider preference is saved on this device.
-                                          </p>
-                                        </div>
+                                  <div className="sx-panel flex flex-col gap-5 rounded-xl p-5 sm:flex-row sm:items-center sm:justify-between">
+                                    <div className="flex min-w-0 items-center gap-4">
+                                      <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl border border-primary/20 bg-primary/10 text-primary">
+                                        {theme ===
+                                          "dark" ? (
+                                          <Moon size={20} />
+                                        ) : (
+                                          <Sun size={20} />
+                                        )}
                                       </div>
 
-                                      <div className="flex w-full justify-center sm:w-auto sm:justify-end">
-                                        <ThemeSlider />
+                                      <div className="min-w-0">
+                                        <h3 className="text-sm font-bold sx-title">
+                                          {theme ===
+                                            "dark"
+                                            ? "Dark Mode"
+                                            : "Light Mode"}
+                                        </h3>
+
+                                        <p className="mt-1 text-xs sx-muted">
+                                          Slider preference
+                                          is saved on this
+                                          device.
+                                        </p>
                                       </div>
                                     </div>
+
+                                    <div className="flex w-full justify-center sm:w-auto sm:justify-end">
+                                      <ThemeSlider />
+                                    </div>
                                   </div>
-                                )}
-                              </div>
-                            )}
-                          </div>
-                        );
-                      })}
-                    </div>
+                                </div>
+                              )}
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })}
                   </div>
-                ))}
+                </div>
+              ))}
             </div>
           )}
         </main>

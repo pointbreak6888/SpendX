@@ -4,6 +4,8 @@ import AuthGuard from "@/components/AuthGuard";
 import TopHeader from "@/components/ui/topheader";
 import LiquidGlassNavbar from "@/components/ui/liquidglassnavbar";
 import { supabase } from "@/lib/supabase";
+import { formatCurrency } from "@/lib/formatCurrency";
+import type { CurrencyCode } from "@/lib/currencies";
 import { useEffect, useMemo, useState } from "react";
 import {
   Wallet,
@@ -41,14 +43,6 @@ type SpendXStatusType =
   | "session"
   | "database"
   | "empty";
-
-function formatCurrency(value: number) {
-  return new Intl.NumberFormat("en-IN", {
-    style: "currency",
-    currency: "INR",
-    maximumFractionDigits: 2,
-  }).format(value);
-}
 
 function formatDate(dateString?: string | null) {
   if (!dateString) return "No date";
@@ -100,6 +94,7 @@ function getSafeCategory(category?: string | null) {
 export default function DashboardPage() {
   const [displayName, setDisplayName] = useState("User");
   const [transactions, setTransactions] = useState<Transaction[]>([]);
+  const [currency, setCurrency] = useState<CurrencyCode>("INR");
   const [loading, setLoading] = useState(true);
   const [dashboardStatus, setDashboardStatus] =
     useState<SpendXStatusType>("loading");
@@ -142,6 +137,20 @@ export default function DashboardPage() {
         setDashboardStatus("session");
         setTransactions([]);
         return;
+      }
+
+      const { data: profileSettings, error: profileError } = await supabase
+        .from("profiles")
+        .select("currency")
+        .eq("id", user.id)
+        .maybeSingle();
+
+      if (profileError) {
+        console.error("Dashboard currency error:", profileError);
+      } else {
+        setCurrency(
+          (profileSettings?.currency as CurrencyCode) || "INR"
+        );
       }
 
       const name =
@@ -310,7 +319,8 @@ export default function DashboardPage() {
       description:
         highestCategoryAmount > 0
           ? `${formatCurrency(
-            highestCategoryAmount
+            highestCategoryAmount,
+            currency
           )} spent on ${highestCategory} this month.`
           : "Add expenses to find your biggest spending category.",
     });
@@ -318,7 +328,7 @@ export default function DashboardPage() {
     insights.push({
       icon: "calendar",
       title: "Projected Expense",
-      value: formatCurrency(projectedMonthlyExpense),
+      value: formatCurrency(projectedMonthlyExpense, currency),
       description:
         currentMonthExpenses > 0
           ? "Estimated full-month expense based on your current daily average."
@@ -328,7 +338,7 @@ export default function DashboardPage() {
     insights.push({
       icon: "sparkles",
       title: "Net Savings",
-      value: formatCurrency(currentMonthSavings),
+      value: formatCurrency(currentMonthSavings, currency),
       description:
         currentMonthSavings >= 0
           ? "Your income is currently higher than your expenses this month."
@@ -351,7 +361,7 @@ export default function DashboardPage() {
       recentTransactions,
       insights,
     };
-  }, [transactions]);
+  }, [transactions, currency]);
 
   const statCards = [
     {
@@ -495,7 +505,7 @@ export default function DashboardPage() {
                   </p>
 
                   <h2 className="mt-2 break-words font-mono text-[2rem] font-bold leading-tight tracking-tight sx-title sm:text-4xl">
-                    {formatCurrency(card.value)}
+                    {formatCurrency(card.value, currency)}
                   </h2>
                 </div>
               );
@@ -586,8 +596,8 @@ export default function DashboardPage() {
                         <div className="flex items-center gap-4">
                           <div
                             className={`flex h-11 w-11 items-center justify-center rounded-2xl border ${isIncome
-                                ? "border-emerald-500/20 bg-emerald-500/10 text-emerald-400"
-                                : "border-red-500/20 bg-red-500/10 text-red-300"
+                              ? "border-emerald-500/20 bg-emerald-500/10 text-emerald-400"
+                              : "border-red-500/20 bg-red-500/10 text-red-300"
                               }`}
                           >
                             {isIncome ? (
@@ -619,7 +629,7 @@ export default function DashboardPage() {
                             }`}
                         >
                           {isIncome ? "+" : "-"}
-                          {formatCurrency(amount)}
+                          {formatCurrency(amount, currency)}
                         </p>
                       </div>
                     );
@@ -642,7 +652,7 @@ export default function DashboardPage() {
                   <div className="mb-2 flex items-center justify-between text-sm">
                     <span className="sx-muted">Income</span>
                     <span className="font-mono text-emerald-400">
-                      {formatCurrency(dashboardData.currentMonthIncome)}
+                      {formatCurrency(dashboardData.currentMonthIncome, currency)}
                     </span>
                   </div>
 
@@ -655,7 +665,7 @@ export default function DashboardPage() {
                   <div className="mb-2 flex items-center justify-between text-sm">
                     <span className="sx-muted">Expenses</span>
                     <span className="font-mono text-red-300">
-                      {formatCurrency(dashboardData.currentMonthExpenses)}
+                      {formatCurrency(dashboardData.currentMonthExpenses, currency)}
                     </span>
                   </div>
 
@@ -684,11 +694,11 @@ export default function DashboardPage() {
 
                   <p
                     className={`mt-2 break-words font-mono text-3xl font-bold ${dashboardData.currentMonthSavings >= 0
-                        ? "text-emerald-400"
-                        : "text-red-300"
+                      ? "text-emerald-400"
+                      : "text-red-300"
                       }`}
                   >
-                    {formatCurrency(dashboardData.currentMonthSavings)}
+                    {formatCurrency(dashboardData.currentMonthSavings, currency)}
                   </p>
 
                   <p className="mt-3 text-sm sx-muted">
@@ -710,7 +720,8 @@ export default function DashboardPage() {
                   <p className="mt-3 text-sm sx-muted">
                     {dashboardData.highestCategoryAmount > 0
                       ? `${formatCurrency(
-                        dashboardData.highestCategoryAmount
+                        dashboardData.highestCategoryAmount,
+                        currency
                       )} spent this month.`
                       : "No expense category data available yet."}
                   </p>
@@ -722,12 +733,12 @@ export default function DashboardPage() {
                   </p>
 
                   <p className="mt-2 break-words font-mono text-2xl font-bold sx-title">
-                    {formatCurrency(dashboardData.projectedMonthlyExpense)}
+                    {formatCurrency(dashboardData.projectedMonthlyExpense, currency)}
                   </p>
 
                   <p className="mt-3 text-sm sx-muted">
                     Daily average expense:{" "}
-                    {formatCurrency(dashboardData.dailyAverageExpense)}
+                    {formatCurrency(dashboardData.dailyAverageExpense, currency)}
                   </p>
                 </div>
               </div>

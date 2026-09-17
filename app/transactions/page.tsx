@@ -1,5 +1,6 @@
 "use client";
 
+import { supabase } from "@/lib/supabase";
 import AuthGuard from "@/components/AuthGuard";
 import LiquidGlassNavbar from "@/components/ui/liquidglassnavbar";
 import TopHeader from "@/components/ui/topheader";
@@ -45,6 +46,9 @@ import {
   type RecurringTransaction,
 } from "@/lib/recurring-transactions";
 
+import { formatCurrency } from "@/lib/formatCurrency";
+import type { CurrencyCode } from "@/lib/currencies";
+
 type Transaction = {
   id: string;
   user_id: string;
@@ -58,15 +62,6 @@ type Transaction = {
 };
 
 type FilterType = "all" | "income" | "expense";
-
-function formatCurrency(value: number) {
-  return new Intl.NumberFormat("en-IN", {
-    style: "currency",
-    currency: "INR",
-    maximumFractionDigits: 2,
-    minimumFractionDigits: 2,
-  }).format(value);
-}
 
 function formatDate(dateString: string) {
   const date = new Date(dateString);
@@ -159,7 +154,11 @@ function calculateExpenseAmount(input: string): number {
 
   const result = Function(`"use strict"; return (${cleanedInput})`)();
 
-  if (typeof result !== "number" || !Number.isFinite(result) || result <= 0) {
+  if (
+    typeof result !== "number" ||
+    !Number.isFinite(result) ||
+    result <= 0
+  ) {
     throw new Error("Enter a valid expense amount greater than 0.");
   }
 
@@ -176,7 +175,9 @@ function calculateIncomeAmount(input: string): number {
   const isValidIncome = /^[0-9]+(\.[0-9]+)?$/.test(cleanedInput);
 
   if (!isValidIncome) {
-    throw new Error("Income amount should be a normal number, like 5000.");
+    throw new Error(
+      "Income amount should be a normal number, like 5000."
+    );
   }
 
   const result = Number(cleanedInput);
@@ -192,48 +193,55 @@ export default function Transactions() {
   const router = useRouter();
 
   const [transactions, setTransactions] = useState<Transaction[]>([]);
+  const [currency, setCurrency] = useState<CurrencyCode>("INR");
   const [searchQuery, setSearchQuery] = useState("");
 
   const [amount, setAmount] = useState("");
   const [type, setType] = useState<"income" | "expense">("expense");
   const [category, setCategory] = useState("");
   const [transactionMode, setTransactionMode] = useState("UPI");
-  const [transactionDate, setTransactionDate] = useState(getTodayISODate());
+  const [transactionDate, setTransactionDate] =
+    useState(getTodayISODate());
 
-  const [filterType, setFilterType] = useState<FilterType>("all");
+  const [filterType, setFilterType] =
+    useState<FilterType>("all");
   const [showFilters, setShowFilters] = useState(false);
   const [showCalendar, setShowCalendar] = useState(false);
-  const [calendarMonth, setCalendarMonth] = useState(new Date());
+  const [calendarMonth, setCalendarMonth] =
+    useState(new Date());
 
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
-  const [deletingId, setDeletingId] = useState<string | null>(null);
+  const [deletingId, setDeletingId] =
+    useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState("");
 
   const [editingTransaction, setEditingTransaction] =
     useState<Transaction | null>(null);
 
-  const [recurringTransactions, setRecurringTransactions] = useState<
-    RecurringTransaction[]
-  >([]);
+  const [recurringTransactions, setRecurringTransactions] =
+    useState<RecurringTransaction[]>([]);
 
-  const [showRecurringForm, setShowRecurringForm] = useState(false);
+  const [showRecurringForm, setShowRecurringForm] =
+    useState(false);
   const [recurringAmount, setRecurringAmount] = useState("");
-  const [recurringType, setRecurringType] = useState<"income" | "expense">(
-    "expense"
-  );
-  const [recurringCategory, setRecurringCategory] = useState("");
-  const [recurringMode, setRecurringMode] = useState("UPI");
+  const [recurringType, setRecurringType] =
+    useState<"income" | "expense">("expense");
+  const [recurringCategory, setRecurringCategory] =
+    useState("");
+  const [recurringMode, setRecurringMode] =
+    useState("UPI");
   const [recurringFrequency, setRecurringFrequency] =
     useState<RecurringFrequency>("monthly");
   const [recurringStartDate, setRecurringStartDate] =
     useState(getTodayISODate());
-  const [recurringEndDate, setRecurringEndDate] = useState("");
+  const [recurringEndDate, setRecurringEndDate] =
+    useState("");
 
-  const [savingRecurring, setSavingRecurring] = useState(false);
-  const [deletingRecurringId, setDeletingRecurringId] = useState<string | null>(
-    null
-  );
+  const [savingRecurring, setSavingRecurring] =
+    useState(false);
+  const [deletingRecurringId, setDeletingRecurringId] =
+    useState<string | null>(null);
 
   const calculatedExpensePreview = useMemo(() => {
     if (type !== "expense" || !amount.trim()) {
@@ -252,7 +260,10 @@ export default function Transactions() {
       const data = await getRecurringTransactions();
       setRecurringTransactions(data);
     } catch (error) {
-      console.error("Load recurring transactions error:", error);
+      console.error(
+        "Load recurring transactions error:",
+        error
+      );
 
       if (isLoginError(error)) {
         router.replace("/login");
@@ -264,6 +275,44 @@ export default function Transactions() {
       }
     }
   }, [router]);
+
+  /*
+   * Load the user's selected currency from the profiles table.
+   *
+   * IMPORTANT:
+   * We use the existing shared Supabase client here.
+   * This keeps authentication consistent with Dashboard,
+   * Settings and the rest of the application.
+   */
+  const loadCurrency = useCallback(async () => {
+    try {
+      const {
+        data: { user },
+        error: userError,
+      } = await supabase.auth.getUser();
+
+      if (userError || !user) {
+        return;
+      }
+
+      const { data, error } = await supabase
+        .from("profiles")
+        .select("currency")
+        .eq("id", user.id)
+        .maybeSingle();
+
+      if (error) {
+        console.error("Load currency error:", error);
+        return;
+      }
+
+      setCurrency(
+        (data?.currency as CurrencyCode) || "INR"
+      );
+    } catch (error) {
+      console.error("Load currency error:", error);
+    }
+  }, []);
 
   const loadTransactions = useCallback(async () => {
     try {
@@ -271,9 +320,13 @@ export default function Transactions() {
       setErrorMessage("");
 
       const data = await getTransactions();
+
       setTransactions(data as Transaction[]);
     } catch (error) {
-      console.error("Load transactions error:", error);
+      console.error(
+        "Load transactions error:",
+        error
+      );
 
       if (isLoginError(error)) {
         router.replace("/login");
@@ -283,23 +336,29 @@ export default function Transactions() {
       if (error instanceof Error) {
         setErrorMessage(error.message);
       } else {
-        setErrorMessage("Something went wrong while loading transactions.");
+        setErrorMessage(
+          "Something went wrong while loading transactions."
+        );
       }
     } finally {
       setLoading(false);
     }
   }, [router]);
 
-  async function handleAddTransaction(event: FormEvent<HTMLFormElement>) {
+  async function handleAddTransaction(
+    event: FormEvent<HTMLFormElement>
+  ) {
     event.preventDefault();
 
     let numericAmount: number;
 
     try {
       if (type === "expense") {
-        numericAmount = calculateExpenseAmount(amount);
+        numericAmount =
+          calculateExpenseAmount(amount);
       } else {
-        numericAmount = calculateIncomeAmount(amount);
+        numericAmount =
+          calculateIncomeAmount(amount);
       }
     } catch (error) {
       if (error instanceof Error) {
@@ -329,7 +388,10 @@ export default function Transactions() {
       };
 
       if (editingTransaction) {
-        await updateTransaction(editingTransaction.id, transaction);
+        await updateTransaction(
+          editingTransaction.id,
+          transaction
+        );
       } else {
         await addTransaction(transaction);
       }
@@ -343,7 +405,10 @@ export default function Transactions() {
 
       await loadTransactions();
     } catch (error) {
-      console.error("Save transaction error:", error);
+      console.error(
+        "Save transaction error:",
+        error
+      );
 
       if (isLoginError(error)) {
         router.replace("/login");
@@ -353,7 +418,9 @@ export default function Transactions() {
       if (error instanceof Error) {
         setErrorMessage(error.message);
       } else {
-        setErrorMessage("Something went wrong while saving the transaction.");
+        setErrorMessage(
+          "Something went wrong while saving the transaction."
+        );
       }
     } finally {
       setSaving(false);
@@ -366,7 +433,9 @@ export default function Transactions() {
     setAmount(String(tx.amount));
     setType(tx.type);
     setCategory(tx.category);
-    setTransactionMode(tx.transaction_mode || "UPI");
+    setTransactionMode(
+      tx.transaction_mode || "UPI"
+    );
     setTransactionDate(tx.transaction_date);
     setErrorMessage("");
   }
@@ -379,10 +448,15 @@ export default function Transactions() {
       await deleteTransaction(id);
 
       setTransactions((current) =>
-        current.filter((transaction) => transaction.id !== id)
+        current.filter(
+          (transaction) => transaction.id !== id
+        )
       );
     } catch (error) {
-      console.error("Delete transaction error:", error);
+      console.error(
+        "Delete transaction error:",
+        error
+      );
 
       if (isLoginError(error)) {
         router.replace("/login");
@@ -392,7 +466,9 @@ export default function Transactions() {
       if (error instanceof Error) {
         setErrorMessage(error.message);
       } else {
-        setErrorMessage("Something went wrong while deleting the transaction.");
+        setErrorMessage(
+          "Something went wrong while deleting the transaction."
+        );
       }
     } finally {
       setDeletingId(null);
@@ -404,15 +480,23 @@ export default function Transactions() {
   ) {
     event.preventDefault();
 
-    const numericAmount = Number(recurringAmount);
+    const numericAmount =
+      Number(recurringAmount);
 
-    if (!Number.isFinite(numericAmount) || numericAmount <= 0) {
-      setErrorMessage("Enter a valid recurring amount greater than 0.");
+    if (
+      !Number.isFinite(numericAmount) ||
+      numericAmount <= 0
+    ) {
+      setErrorMessage(
+        "Enter a valid recurring amount greater than 0."
+      );
       return;
     }
 
     if (!recurringCategory.trim()) {
-      setErrorMessage("Enter a recurring transaction category.");
+      setErrorMessage(
+        "Enter a recurring transaction category."
+      );
       return;
     }
 
@@ -421,8 +505,13 @@ export default function Transactions() {
       return;
     }
 
-    if (recurringEndDate && recurringEndDate < recurringStartDate) {
-      setErrorMessage("End date cannot be before the start date.");
+    if (
+      recurringEndDate &&
+      recurringEndDate < recurringStartDate
+    ) {
+      setErrorMessage(
+        "End date cannot be before the start date."
+      );
       return;
     }
 
@@ -451,7 +540,10 @@ export default function Transactions() {
 
       await loadRecurringTransactions();
     } catch (error) {
-      console.error("Save recurring transaction error:", error);
+      console.error(
+        "Save recurring transaction error:",
+        error
+      );
 
       if (isLoginError(error)) {
         router.replace("/login");
@@ -470,7 +562,9 @@ export default function Transactions() {
     }
   }
 
-  async function handleDeleteRecurringTransaction(id: string) {
+  async function handleDeleteRecurringTransaction(
+    id: string
+  ) {
     try {
       setDeletingRecurringId(id);
       setErrorMessage("");
@@ -478,10 +572,16 @@ export default function Transactions() {
       await deleteRecurringTransaction(id);
 
       setRecurringTransactions((current) =>
-        current.filter((transaction) => transaction.id !== id)
+        current.filter(
+          (transaction) =>
+            transaction.id !== id
+        )
       );
     } catch (error) {
-      console.error("Delete recurring transaction error:", error);
+      console.error(
+        "Delete recurring transaction error:",
+        error
+      );
 
       if (isLoginError(error)) {
         router.replace("/login");
@@ -506,18 +606,24 @@ export default function Transactions() {
     try {
       setErrorMessage("");
 
-      const updated = await toggleRecurringTransaction(
-        recurring.id,
-        !recurring.is_active
-      );
+      const updated =
+        await toggleRecurringTransaction(
+          recurring.id,
+          !recurring.is_active
+        );
 
       setRecurringTransactions((current) =>
         current.map((item) =>
-          item.id === updated.id ? updated : item
+          item.id === updated.id
+            ? updated
+            : item
         )
       );
     } catch (error) {
-      console.error("Toggle recurring transaction error:", error);
+      console.error(
+        "Toggle recurring transaction error:",
+        error
+      );
 
       if (isLoginError(error)) {
         router.replace("/login");
@@ -541,13 +647,21 @@ export default function Transactions() {
 
   function goToPreviousMonth() {
     setCalendarMonth(
-      new Date(calendarMonth.getFullYear(), calendarMonth.getMonth() - 1, 1)
+      new Date(
+        calendarMonth.getFullYear(),
+        calendarMonth.getMonth() - 1,
+        1
+      )
     );
   }
 
   function goToNextMonth() {
     setCalendarMonth(
-      new Date(calendarMonth.getFullYear(), calendarMonth.getMonth() + 1, 1)
+      new Date(
+        calendarMonth.getFullYear(),
+        calendarMonth.getMonth() + 1,
+        1
+      )
     );
   }
 
@@ -559,7 +673,9 @@ export default function Transactions() {
 
   function handleExportCSV() {
     if (filteredTransactions.length === 0) {
-      setErrorMessage("There are no transactions to export.");
+      setErrorMessage(
+        "There are no transactions to export."
+      );
       return;
     }
 
@@ -567,22 +683,32 @@ export default function Transactions() {
       "Date",
       "Type",
       "Category",
-      "Amount",
+      `Amount (${currency})`,
       "Transaction Mode",
     ];
 
-    const rows = filteredTransactions.map((transaction) => [
-      formatDate(transaction.transaction_date),
-      transaction.type,
-      transaction.category,
-      Number(transaction.amount).toFixed(2),
-      transaction.transaction_mode || "",
-    ]);
+    const rows = filteredTransactions.map(
+      (transaction) => [
+        formatDate(
+          transaction.transaction_date
+        ),
+        transaction.type,
+        transaction.category,
+        Number(transaction.amount).toFixed(2),
+        transaction.transaction_mode || "",
+      ]
+    );
 
     const csvContent = [headers, ...rows]
       .map((row) =>
         row
-          .map((value) => `"${String(value).replace(/"/g, '""')}"`)
+          .map(
+            (value) =>
+              `"${String(value).replace(
+                /"/g,
+                '""'
+              )}"`
+          )
           .join(",")
       )
       .join("\n");
@@ -619,68 +745,128 @@ export default function Transactions() {
         await Promise.all([
           loadTransactions(),
           loadRecurringTransactions(),
+          loadCurrency(),
         ]);
       })();
     }, 0);
 
-    return () => window.clearTimeout(timeoutId);
-  }, [loadTransactions, loadRecurringTransactions]);
+    return () =>
+      window.clearTimeout(timeoutId);
+  }, [
+    loadTransactions,
+    loadRecurringTransactions,
+    loadCurrency,
+  ]);
 
   const filteredTransactions = useMemo(() => {
-    const query = searchQuery.toLowerCase().trim();
+    const query =
+      searchQuery.toLowerCase().trim();
 
     return transactions
       .filter((transaction) => {
         const title =
-          transaction.transaction_mode || transaction.category || "";
-        const amountText = String(transaction.amount);
+          transaction.transaction_mode ||
+          transaction.category ||
+          "";
+
+        const amountText =
+          String(transaction.amount);
 
         const matchesSearch =
           !query ||
-          title.toLowerCase().includes(query) ||
-          transaction.category.toLowerCase().includes(query) ||
-          transaction.type.toLowerCase().includes(query) ||
-          amountText.toLowerCase().includes(query);
+          title
+            .toLowerCase()
+            .includes(query) ||
+          transaction.category
+            .toLowerCase()
+            .includes(query) ||
+          transaction.type
+            .toLowerCase()
+            .includes(query) ||
+          amountText
+            .toLowerCase()
+            .includes(query);
 
         const matchesType =
-          filterType === "all" || transaction.type === filterType;
+          filterType === "all" ||
+          transaction.type === filterType;
 
-        return matchesSearch && matchesType;
+        return (
+          matchesSearch && matchesType
+        );
       })
       .sort((a, b) => {
-        const transactionDateA = new Date(a.transaction_date).getTime();
-        const transactionDateB = new Date(b.transaction_date).getTime();
+        const transactionDateA =
+          new Date(
+            a.transaction_date
+          ).getTime();
 
-        if (transactionDateB !== transactionDateA) {
-          return transactionDateB - transactionDateA;
+        const transactionDateB =
+          new Date(
+            b.transaction_date
+          ).getTime();
+
+        if (
+          transactionDateB !==
+          transactionDateA
+        ) {
+          return (
+            transactionDateB -
+            transactionDateA
+          );
         }
 
-        const createdAtA = new Date(a.created_at).getTime();
-        const createdAtB = new Date(b.created_at).getTime();
+        const createdAtA =
+          new Date(a.created_at).getTime();
 
-        return createdAtB - createdAtA;
+        const createdAtB =
+          new Date(b.created_at).getTime();
+
+        return (
+          createdAtB -
+          createdAtA
+        );
       });
-  }, [transactions, searchQuery, filterType]);
+  }, [
+    transactions,
+    searchQuery,
+    filterType,
+  ]);
 
-  const calendarDays = getCalendarDays(calendarMonth);
+  const calendarDays =
+    getCalendarDays(calendarMonth);
 
   const calendarActivity = useMemo(() => {
     return transactions.reduce<
-      Record<string, { income: boolean; expense: boolean }>
+      Record<
+        string,
+        {
+          income: boolean;
+          expense: boolean;
+        }
+      >
     >((activity, transaction) => {
-      const dateKey = toTransactionDateKey(transaction.transaction_date);
+      const dateKey =
+        toTransactionDateKey(
+          transaction.transaction_date
+        );
 
       if (!dateKey) {
         return activity;
       }
 
-      const dateActivity = activity[dateKey] || {
-        income: false,
-        expense: false,
-      };
+      const dateActivity =
+        activity[dateKey] || {
+          income: false,
+          expense: false,
+        };
 
-      dateActivity[transaction.type] = true;
-      activity[dateKey] = dateActivity;
+      dateActivity[
+        transaction.type
+      ] = true;
+
+      activity[dateKey] =
+        dateActivity;
 
       return activity;
     }, {});
@@ -699,7 +885,8 @@ export default function Transactions() {
               </h1>
 
               <p className="mt-2 sx-muted">
-                Add, search, filter, and manage your SpendX ledger.
+                Add, search, filter, and manage
+                your SpendX ledger.
               </p>
             </div>
           </div>
@@ -710,7 +897,9 @@ export default function Transactions() {
 
               <button
                 type="button"
-                onClick={() => setErrorMessage("")}
+                onClick={() =>
+                  setErrorMessage("")
+                }
                 className="rounded-full p-1 text-red-400 hover:bg-red-500/10"
                 aria-label="Clear error"
               >
@@ -747,8 +936,8 @@ export default function Transactions() {
                     setErrorMessage("");
                   }}
                   className={`rounded-xl px-4 py-2 text-xs font-semibold transition-colors ${type === "expense"
-                    ? "bg-red-500/20 text-red-400"
-                    : "sx-muted hover:sx-title"
+                      ? "bg-red-500/20 text-red-400"
+                      : "sx-muted hover:sx-title"
                     }`}
                 >
                   Expense
@@ -762,8 +951,8 @@ export default function Transactions() {
                     setErrorMessage("");
                   }}
                   className={`rounded-xl px-4 py-2 text-xs font-semibold transition-colors ${type === "income"
-                    ? "bg-emerald-500/20 text-emerald-400"
-                    : "sx-muted hover:sx-title"
+                      ? "bg-emerald-500/20 text-emerald-400"
+                      : "sx-muted hover:sx-title"
                     }`}
                 >
                   Income
@@ -777,7 +966,11 @@ export default function Transactions() {
                   type="text"
                   inputMode="decimal"
                   value={amount}
-                  onChange={(event) => setAmount(event.target.value)}
+                  onChange={(event) =>
+                    setAmount(
+                      event.target.value
+                    )
+                  }
                   placeholder={
                     type === "expense"
                       ? "Amount, e.g. 30x5"
@@ -786,24 +979,34 @@ export default function Transactions() {
                   className="sx-field w-full rounded-2xl px-4 py-3 text-sm placeholder:text-muted-foreground"
                 />
 
-                {type === "expense" && amount.trim() && (
-                  <p className="mt-2 text-xs sx-muted">
-                    Final amount:{" "}
-                    <span className="font-semibold text-emerald-400">
-                      {calculatedExpensePreview !== null
-                        ? formatCurrency(calculatedExpensePreview)
-                        : "Invalid"}
-                    </span>
-                  </p>
-                )}
+                {type === "expense" &&
+                  amount.trim() && (
+                    <p className="mt-2 text-xs sx-muted">
+                      Final amount:{" "}
+                      <span className="font-semibold text-emerald-400">
+                        {calculatedExpensePreview !==
+                          null
+                          ? formatCurrency(
+                            calculatedExpensePreview,
+                            currency
+                          )
+                          : "Invalid"}
+                      </span>
+                    </p>
+                  )}
               </div>
 
               <input
                 type="text"
                 value={category}
                 onChange={(event) => {
-                  const value = event.target.value;
-                  setCategory(value.charAt(0).toUpperCase() + value.slice(1));
+                  const value =
+                    event.target.value;
+
+                  setCategory(
+                    value.charAt(0).toUpperCase() +
+                    value.slice(1)
+                  );
                 }}
                 placeholder="Category"
                 className="sx-field w-full rounded-2xl px-4 py-3 text-sm placeholder:text-muted-foreground"
@@ -811,25 +1014,53 @@ export default function Transactions() {
 
               <select
                 value={transactionMode}
-                onChange={(event) => setTransactionMode(event.target.value)}
+                onChange={(event) =>
+                  setTransactionMode(
+                    event.target.value
+                  )
+                }
                 className="sx-field w-full rounded-2xl px-4 py-3 text-sm"
               >
-                <option value="UPI">UPI</option>
-                <option value="Cash">Cash</option>
-                <option value="Credit Card">Credit Card</option>
-                <option value="Debit Card">Debit Card</option>
-                <option value="Net Banking">Net Banking</option>
-                <option value="Wallet">Wallet</option>
+                <option value="UPI">
+                  UPI
+                </option>
+                <option value="Cash">
+                  Cash
+                </option>
+                <option value="Credit Card">
+                  Credit Card
+                </option>
+                <option value="Debit Card">
+                  Debit Card
+                </option>
+                <option value="Net Banking">
+                  Net Banking
+                </option>
+                <option value="Wallet">
+                  Wallet
+                </option>
               </select>
 
               <div className="relative">
                 <button
                   type="button"
-                  onClick={() => setShowCalendar((current) => !current)}
+                  onClick={() =>
+                    setShowCalendar(
+                      (current) => !current
+                    )
+                  }
                   className="sx-field flex w-full items-center justify-between rounded-2xl px-4 py-3 text-left text-sm"
                 >
-                  <span>{formatDate(transactionDate)}</span>
-                  <CalendarDays size={16} className="sx-muted" />
+                  <span>
+                    {formatDate(
+                      transactionDate
+                    )}
+                  </span>
+
+                  <CalendarDays
+                    size={16}
+                    className="sx-muted"
+                  />
                 </button>
 
                 {showCalendar && (
@@ -837,27 +1068,38 @@ export default function Transactions() {
                     <div className="mb-4 flex items-center justify-between">
                       <button
                         type="button"
-                        onClick={goToPreviousMonth}
+                        onClick={
+                          goToPreviousMonth
+                        }
                         className="rounded-xl border border-border p-2 sx-muted hover:bg-card/60 hover:sx-title"
                         aria-label="Previous month"
                       >
-                        <ChevronLeft size={16} />
+                        <ChevronLeft
+                          size={16}
+                        />
                       </button>
 
                       <p className="font-mono text-sm font-semibold sx-title">
-                        {calendarMonth.toLocaleDateString("en-IN", {
-                          month: "long",
-                          year: "numeric",
-                        })}
+                        {calendarMonth.toLocaleDateString(
+                          "en-IN",
+                          {
+                            month: "long",
+                            year: "numeric",
+                          }
+                        )}
                       </p>
 
                       <button
                         type="button"
-                        onClick={goToNextMonth}
+                        onClick={
+                          goToNextMonth
+                        }
                         className="rounded-xl border border-border p-2 sx-muted hover:bg-card/60 hover:sx-title"
                         aria-label="Next month"
                       >
-                        <ChevronRight size={16} />
+                        <ChevronRight
+                          size={16}
+                        />
                       </button>
                     </div>
 
@@ -872,44 +1114,65 @@ export default function Transactions() {
                     </div>
 
                     <div className="grid grid-cols-7 gap-1">
-                      {calendarDays.map((date, index) => {
-                        if (!date) {
-                          return <div key={`empty-${index}`} />;
+                      {calendarDays.map(
+                        (date, index) => {
+                          if (!date) {
+                            return (
+                              <div
+                                key={`empty-${index}`}
+                              />
+                            );
+                          }
+
+                          const isoDate =
+                            toISODate(date);
+
+                          const selected =
+                            isoDate ===
+                            transactionDate;
+
+                          const today =
+                            isoDate ===
+                            getTodayISODate();
+
+                          const activity =
+                            calendarActivity[
+                            isoDate
+                            ];
+
+                          return (
+                            <button
+                              key={isoDate}
+                              type="button"
+                              onClick={() =>
+                                handleSelectDate(
+                                  date
+                                )
+                              }
+                              className={`flex h-10 flex-col items-center justify-center rounded-xl text-sm transition-colors ${selected
+                                  ? "bg-emerald-500 font-bold text-black"
+                                  : today
+                                    ? "border border-emerald-500/30 bg-emerald-500/10 text-emerald-400"
+                                    : "sx-muted hover:bg-card/60 hover:sx-title"
+                                }`}
+                            >
+                              <span className="leading-none">
+                                {date.getDate()}
+                              </span>
+
+                              <span className="mt-1 flex h-1.5 items-center justify-center gap-1">
+                                {activity?.expense && (
+                                  <span className="h-1.5 w-1.5 rounded-full bg-red-500" />
+                                )}
+
+                                {activity?.income && (
+                                  <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />
+                                )}
+                              </span>
+                            </button>
+                          );
                         }
-
-                        const isoDate = toISODate(date);
-                        const selected = isoDate === transactionDate;
-                        const today = isoDate === getTodayISODate();
-                        const activity = calendarActivity[isoDate];
-
-                        return (
-                          <button
-                            key={isoDate}
-                            type="button"
-                            onClick={() => handleSelectDate(date)}
-                            className={`flex h-10 flex-col items-center justify-center rounded-xl text-sm transition-colors ${selected
-                              ? "bg-emerald-500 font-bold text-black"
-                              : today
-                                ? "border border-emerald-500/30 bg-emerald-500/10 text-emerald-400"
-                                : "sx-muted hover:bg-card/60 hover:sx-title"
-                              }`}
-                          >
-                            <span className="leading-none">
-                              {date.getDate()}
-                            </span>
-
-                            <span className="mt-1 flex h-1.5 items-center justify-center gap-1">
-                              {activity?.expense && (
-                                <span className="h-1.5 w-1.5 rounded-full bg-red-500" />
-                              )}
-
-                              {activity?.income && (
-                                <span className="h-1.5 w-1.5 rounded-full bg-emerald-500" />
-                              )}
-                            </span>
-                          </button>
-                        );
-                      })}
+                      )}
                     </div>
                   </div>
                 )}
@@ -922,7 +1185,10 @@ export default function Transactions() {
               >
                 {saving ? (
                   <>
-                    <Loader2 size={16} className="animate-spin" />
+                    <Loader2
+                      size={16}
+                      className="animate-spin"
+                    />
                     Saving
                   </>
                 ) : editingTransaction ? (
@@ -940,7 +1206,6 @@ export default function Transactions() {
             </div>
           </form>
 
-          {/* Recurring Transactions */}
           <section className="relative z-10 mb-8 sx-card rounded-3xl p-6">
             <div className="mb-5 flex items-center justify-between gap-4">
               <div>
@@ -949,25 +1214,32 @@ export default function Transactions() {
                 </h3>
 
                 <p className="mt-1 text-xs sx-muted">
-                  Automatically add transactions on a schedule.
+                  Automatically add transactions
+                  on a schedule.
                 </p>
               </div>
 
               <button
                 type="button"
                 onClick={() => {
-                  setShowRecurringForm((current) => !current);
+                  setShowRecurringForm(
+                    (current) => !current
+                  );
                   setErrorMessage("");
                 }}
                 className="rounded-2xl bg-white px-4 py-2 text-xs font-semibold text-black transition-opacity hover:opacity-90"
               >
-                {showRecurringForm ? "Cancel" : "+ Add Recurring"}
+                {showRecurringForm
+                  ? "Cancel"
+                  : "+ Add Recurring"}
               </button>
             </div>
 
             {showRecurringForm && (
               <form
-                onSubmit={handleAddRecurringTransaction}
+                onSubmit={
+                  handleAddRecurringTransaction
+                }
                 className="mb-6 rounded-2xl border border-border bg-card/30 p-5"
               >
                 <div className="mb-5 flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
@@ -977,18 +1249,24 @@ export default function Transactions() {
                     </p>
 
                     <p className="mt-1 text-xs sx-muted">
-                      This will automatically create normal transactions when
-                      they are due.
+                      This will automatically
+                      create normal transactions
+                      when they are due.
                     </p>
                   </div>
 
                   <div className="flex rounded-2xl border border-border bg-card/40 p-1">
                     <button
                       type="button"
-                      onClick={() => setRecurringType("expense")}
-                      className={`rounded-xl px-4 py-2 text-xs font-semibold ${recurringType === "expense"
-                        ? "bg-red-500/20 text-red-400"
-                        : "sx-muted"
+                      onClick={() =>
+                        setRecurringType(
+                          "expense"
+                        )
+                      }
+                      className={`rounded-xl px-4 py-2 text-xs font-semibold ${recurringType ===
+                          "expense"
+                          ? "bg-red-500/20 text-red-400"
+                          : "sx-muted"
                         }`}
                     >
                       Expense
@@ -996,10 +1274,15 @@ export default function Transactions() {
 
                     <button
                       type="button"
-                      onClick={() => setRecurringType("income")}
-                      className={`rounded-xl px-4 py-2 text-xs font-semibold ${recurringType === "income"
-                        ? "bg-emerald-500/20 text-emerald-400"
-                        : "sx-muted"
+                      onClick={() =>
+                        setRecurringType(
+                          "income"
+                        )
+                      }
+                      className={`rounded-xl px-4 py-2 text-xs font-semibold ${recurringType ===
+                          "income"
+                          ? "bg-emerald-500/20 text-emerald-400"
+                          : "sx-muted"
                         }`}
                     >
                       Income
@@ -1014,7 +1297,9 @@ export default function Transactions() {
                     step="0.01"
                     value={recurringAmount}
                     onChange={(event) =>
-                      setRecurringAmount(event.target.value)
+                      setRecurringAmount(
+                        event.target.value
+                      )
                     }
                     placeholder="Amount"
                     className="sx-field w-full rounded-2xl px-4 py-3 text-sm placeholder:text-muted-foreground"
@@ -1024,10 +1309,14 @@ export default function Transactions() {
                     type="text"
                     value={recurringCategory}
                     onChange={(event) => {
-                      const value = event.target.value;
+                      const value =
+                        event.target.value;
 
                       setRecurringCategory(
-                        value.charAt(0).toUpperCase() + value.slice(1)
+                        value
+                          .charAt(0)
+                          .toUpperCase() +
+                        value.slice(1)
                       );
                     }}
                     placeholder="Category"
@@ -1037,31 +1326,54 @@ export default function Transactions() {
                   <select
                     value={recurringMode}
                     onChange={(event) =>
-                      setRecurringMode(event.target.value)
+                      setRecurringMode(
+                        event.target.value
+                      )
                     }
                     className="sx-field w-full rounded-2xl px-4 py-3 text-sm"
                   >
-                    <option value="UPI">UPI</option>
-                    <option value="Cash">Cash</option>
-                    <option value="Credit Card">Credit Card</option>
-                    <option value="Debit Card">Debit Card</option>
-                    <option value="Net Banking">Net Banking</option>
-                    <option value="Wallet">Wallet</option>
+                    <option value="UPI">
+                      UPI
+                    </option>
+                    <option value="Cash">
+                      Cash
+                    </option>
+                    <option value="Credit Card">
+                      Credit Card
+                    </option>
+                    <option value="Debit Card">
+                      Debit Card
+                    </option>
+                    <option value="Net Banking">
+                      Net Banking
+                    </option>
+                    <option value="Wallet">
+                      Wallet
+                    </option>
                   </select>
 
                   <select
                     value={recurringFrequency}
                     onChange={(event) =>
                       setRecurringFrequency(
-                        event.target.value as RecurringFrequency
+                        event.target
+                          .value as RecurringFrequency
                       )
                     }
                     className="sx-field w-full rounded-2xl px-4 py-3 text-sm"
                   >
-                    <option value="daily">Daily</option>
-                    <option value="weekly">Weekly</option>
-                    <option value="monthly">Monthly</option>
-                    <option value="yearly">Yearly</option>
+                    <option value="daily">
+                      Daily
+                    </option>
+                    <option value="weekly">
+                      Weekly
+                    </option>
+                    <option value="monthly">
+                      Monthly
+                    </option>
+                    <option value="yearly">
+                      Yearly
+                    </option>
                   </select>
 
                   <div>
@@ -1073,7 +1385,9 @@ export default function Transactions() {
                       type="date"
                       value={recurringStartDate}
                       onChange={(event) =>
-                        setRecurringStartDate(event.target.value)
+                        setRecurringStartDate(
+                          event.target.value
+                        )
                       }
                       className="sx-field w-full rounded-2xl px-4 py-3 text-sm"
                     />
@@ -1089,7 +1403,9 @@ export default function Transactions() {
                       value={recurringEndDate}
                       min={recurringStartDate}
                       onChange={(event) =>
-                        setRecurringEndDate(event.target.value)
+                        setRecurringEndDate(
+                          event.target.value
+                        )
                       }
                       className="sx-field w-full rounded-2xl px-4 py-3 text-sm"
                     />
@@ -1099,7 +1415,9 @@ export default function Transactions() {
                 <div className="mt-5 flex justify-end">
                   <button
                     type="submit"
-                    disabled={savingRecurring}
+                    disabled={
+                      savingRecurring
+                    }
                     className="rounded-2xl bg-white px-6 py-3 text-sm font-semibold text-black transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
                   >
                     {savingRecurring
@@ -1110,101 +1428,128 @@ export default function Transactions() {
               </form>
             )}
 
-            {recurringTransactions.length === 0 ? (
+            {recurringTransactions.length ===
+              0 ? (
               <div className="rounded-2xl border border-border bg-card/20 px-5 py-8 text-center">
                 <p className="text-sm sx-muted">
                   No recurring transactions yet.
                 </p>
 
                 <p className="mt-1 text-xs sx-muted">
-                  Add one to automatically create transactions on a schedule.
+                  Add one to automatically create
+                  transactions on a schedule.
                 </p>
               </div>
             ) : (
               <div className="space-y-3">
-                {recurringTransactions.map((recurring) => (
-                  <div
-                    key={recurring.id}
-                    className="flex flex-col gap-4 rounded-2xl border border-border bg-card/20 p-4 md:flex-row md:items-center md:justify-between"
-                  >
-                    <div className="min-w-0">
-                      <div className="flex flex-wrap items-center gap-2">
-                        <p className="font-semibold sx-title">
-                          {recurring.category || "Recurring Transaction"}
-                        </p>
+                {recurringTransactions.map(
+                  (recurring) => (
+                    <div
+                      key={recurring.id}
+                      className="flex flex-col gap-4 rounded-2xl border border-border bg-card/20 p-4 md:flex-row md:items-center md:justify-between"
+                    >
+                      <div className="min-w-0">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <p className="font-semibold sx-title">
+                            {recurring.category ||
+                              "Recurring Transaction"}
+                          </p>
 
-                        <span
-                          className={`rounded-full px-2 py-1 text-[10px] font-semibold ${recurring.type === "expense"
-                            ? "bg-red-500/10 text-red-400"
-                            : "bg-emerald-500/10 text-emerald-400"
-                            }`}
-                        >
-                          {recurring.type}
-                        </span>
+                          <span
+                            className={`rounded-full px-2 py-1 text-[10px] font-semibold ${recurring.type ===
+                                "expense"
+                                ? "bg-red-500/10 text-red-400"
+                                : "bg-emerald-500/10 text-emerald-400"
+                              }`}
+                          >
+                            {recurring.type}
+                          </span>
 
-                        <span
-                          className={`rounded-full px-2 py-1 text-[10px] font-semibold ${recurring.is_active
-                            ? "bg-emerald-500/10 text-emerald-400"
-                            : "bg-white/5 sx-muted"
-                            }`}
-                        >
-                          {recurring.is_active ? "Active" : "Paused"}
-                        </span>
+                          <span
+                            className={`rounded-full px-2 py-1 text-[10px] font-semibold ${recurring.is_active
+                                ? "bg-emerald-500/10 text-emerald-400"
+                                : "bg-white/5 sx-muted"
+                              }`}
+                          >
+                            {recurring.is_active
+                              ? "Active"
+                              : "Paused"}
+                          </span>
+                        </div>
+
+                        <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs sx-muted">
+                          <span>
+                            {formatCurrency(
+                              Number(
+                                recurring.amount
+                              ),
+                              currency
+                            )}
+                          </span>
+
+                          <span>
+                            {recurring.frequency
+                              .charAt(0)
+                              .toUpperCase() +
+                              recurring.frequency.slice(
+                                1
+                              )}
+                          </span>
+
+                          <span>
+                            Next:{" "}
+                            {formatDate(
+                              recurring.next_occurrence
+                            )}
+                          </span>
+
+                          <span>
+                            {recurring.transaction_mode ||
+                              "UPI"}
+                          </span>
+                        </div>
                       </div>
 
-                      <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs sx-muted">
-                        <span>
-                          {formatCurrency(Number(recurring.amount))}
-                        </span>
+                      <div className="flex shrink-0 gap-2">
+                        <button
+                          type="button"
+                          onClick={() =>
+                            handleToggleRecurringTransaction(
+                              recurring
+                            )
+                          }
+                          className="rounded-xl border border-border px-3 py-2 text-xs font-semibold sx-muted hover:bg-card/40"
+                        >
+                          {recurring.is_active
+                            ? "Pause"
+                            : "Resume"}
+                        </button>
 
-                        <span>
-                          {recurring.frequency.charAt(0).toUpperCase() +
-                            recurring.frequency.slice(1)}
-                        </span>
-
-                        <span>
-                          Next: {formatDate(recurring.next_occurrence)}
-                        </span>
-
-                        <span>
-                          {recurring.transaction_mode || "UPI"}
-                        </span>
+                        <button
+                          type="button"
+                          onClick={() =>
+                            handleDeleteRecurringTransaction(
+                              recurring.id
+                            )
+                          }
+                          disabled={
+                            deletingRecurringId ===
+                            recurring.id
+                          }
+                          className="rounded-xl border border-red-500/20 bg-red-500/5 px-3 py-2 text-xs font-semibold text-red-400 hover:bg-red-500/10 disabled:opacity-50"
+                        >
+                          {deletingRecurringId ===
+                            recurring.id
+                            ? "Deleting..."
+                            : "Delete"}
+                        </button>
                       </div>
                     </div>
-
-                    <div className="flex shrink-0 gap-2">
-                      <button
-                        type="button"
-                        onClick={() =>
-                          handleToggleRecurringTransaction(recurring)
-                        }
-                        className="rounded-xl border border-border px-3 py-2 text-xs font-semibold sx-muted hover:bg-card/40"
-                      >
-                        {recurring.is_active ? "Pause" : "Resume"}
-                      </button>
-
-                      <button
-                        type="button"
-                        onClick={() =>
-                          handleDeleteRecurringTransaction(recurring.id)
-                        }
-                        disabled={
-                          deletingRecurringId === recurring.id
-                        }
-                        className="rounded-xl border border-red-500/20 bg-red-500/5 px-3 py-2 text-xs font-semibold text-red-400 hover:bg-red-500/10 disabled:opacity-50"
-                      >
-                        {deletingRecurringId === recurring.id
-                          ? "Deleting..."
-                          : "Delete"}
-                      </button>
-                    </div>
-                  </div>
-                ))}
+                  )
+                )}
               </div>
             )}
           </section>
-
-          <div className="mb-8 flex flex-col gap-4 sm:flex-row"></div>
 
           <div className="mb-8 flex flex-col gap-4 sm:flex-row">
             <div className="relative flex-1">
@@ -1216,7 +1561,11 @@ export default function Transactions() {
               <input
                 type="text"
                 value={searchQuery}
-                onChange={(event) => setSearchQuery(event.target.value)}
+                onChange={(event) =>
+                  setSearchQuery(
+                    event.target.value
+                  )
+                }
                 placeholder="Search mode, category, type, amount..."
                 className="sx-field w-full py-3 pl-11 pr-4 text-sm placeholder:text-muted-foreground"
               />
@@ -1225,7 +1574,11 @@ export default function Transactions() {
             <div className="relative">
               <button
                 type="button"
-                onClick={() => setShowFilters((current) => !current)}
+                onClick={() =>
+                  setShowFilters(
+                    (current) => !current
+                  )
+                }
                 className="flex items-center gap-2 rounded-2xl border border-border bg-card/40 px-5 py-3 text-sm font-semibold sx-muted transition-colors hover:bg-card/60"
               >
                 <SlidersHorizontal size={16} />
@@ -1236,10 +1589,12 @@ export default function Transactions() {
                 <div className="absolute right-0 top-14 z-30 w-56 sx-card rounded-3xl p-3 shadow-2xl">
                   <button
                     type="button"
-                    onClick={() => setFilterType("all")}
+                    onClick={() =>
+                      setFilterType("all")
+                    }
                     className={`w-full rounded-2xl px-4 py-3 text-left text-sm transition-colors ${filterType === "all"
-                      ? "bg-card/60 sx-title"
-                      : "sx-muted hover:bg-card/40 hover:sx-title"
+                        ? "bg-card/60 sx-title"
+                        : "sx-muted hover:bg-card/40 hover:sx-title"
                       }`}
                   >
                     All transactions
@@ -1247,10 +1602,12 @@ export default function Transactions() {
 
                   <button
                     type="button"
-                    onClick={() => setFilterType("income")}
+                    onClick={() =>
+                      setFilterType("income")
+                    }
                     className={`w-full rounded-2xl px-4 py-3 text-left text-sm transition-colors ${filterType === "income"
-                      ? "bg-emerald-500/15 text-emerald-400"
-                      : "sx-muted hover:bg-card/40 hover:sx-title"
+                        ? "bg-emerald-500/15 text-emerald-400"
+                        : "sx-muted hover:bg-card/40 hover:sx-title"
                       }`}
                   >
                     Income only
@@ -1258,10 +1615,12 @@ export default function Transactions() {
 
                   <button
                     type="button"
-                    onClick={() => setFilterType("expense")}
+                    onClick={() =>
+                      setFilterType("expense")
+                    }
                     className={`w-full rounded-2xl px-4 py-3 text-left text-sm transition-colors ${filterType === "expense"
-                      ? "bg-red-500/15 text-red-400"
-                      : "sx-muted hover:bg-card/40 hover:sx-title"
+                        ? "bg-red-500/15 text-red-400"
+                        : "sx-muted hover:bg-card/40 hover:sx-title"
                       }`}
                   >
                     Expenses only
@@ -1281,7 +1640,10 @@ export default function Transactions() {
             <button
               type="button"
               onClick={handleExportCSV}
-              disabled={filteredTransactions.length === 0 || loading}
+              disabled={
+                filteredTransactions.length ===
+                0 || loading
+              }
               className="flex items-center justify-center gap-2 rounded-2xl border border-border bg-card/40 px-5 py-3 text-sm font-semibold sx-muted transition-colors hover:bg-card/60 hover:sx-title disabled:cursor-not-allowed disabled:opacity-50"
             >
               <Download size={16} />
@@ -1296,112 +1658,159 @@ export default function Transactions() {
               </h3>
 
               <span className="font-mono text-xs sx-muted">
-                {filteredTransactions.length} ledger entries
+                {filteredTransactions.length}{" "}
+                ledger entries
               </span>
             </div>
 
             {loading ? (
               <div className="flex items-center justify-center py-16 sx-muted">
-                <Loader2 size={20} className="mr-2 animate-spin" />
+                <Loader2
+                  size={20}
+                  className="mr-2 animate-spin"
+                />
                 Loading transactions...
               </div>
-            ) : filteredTransactions.length === 0 ? (
+            ) : filteredTransactions.length ===
+              0 ? (
               <div className="px-6 py-16 text-center">
                 <p className="text-sm sx-muted">
-                  No transactions found. Add your first income or expense above.
+                  No transactions found. Add your
+                  first income or expense above.
                 </p>
               </div>
             ) : (
               <div className="divide-y divide-border/60">
-                {filteredTransactions.map((tx) => {
-                  const isIncome = tx.type === "income";
-                  const amountNumber = Number(tx.amount);
-                  const title = tx.category || "Transaction";
+                {filteredTransactions.map(
+                  (tx) => {
+                    const isIncome =
+                      tx.type === "income";
 
-                  return (
-                    <div
-                      key={tx.id}
-                      className="flex flex-col justify-between gap-4 p-5 transition-all duration-200 hover:bg-card/30 sm:flex-row sm:items-center"
-                    >
-                      <div className="flex items-center gap-4">
-                        <div
-                          className={`flex h-12 w-12 items-center justify-center rounded-2xl border text-lg ${isIncome
-                            ? "border-emerald-500/10 bg-emerald-500/10 text-emerald-500"
-                            : "border-red-500/10 bg-red-500/10 text-red-500"
-                            }`}
-                        >
-                          {isIncome ? (
-                            <ArrowDownLeft size={20} />
-                          ) : (
-                            <ArrowUpRight size={20} />
-                          )}
-                        </div>
+                    const amountNumber =
+                      Number(tx.amount);
 
-                        <div>
-                          <div className="flex flex-wrap items-center gap-2">
-                            <h4 className="text-sm font-bold sx-title">
-                              {title}
-                            </h4>
+                    const title =
+                      tx.category ||
+                      "Transaction";
 
-                            {tx.transaction_mode && (
-                              <span className="flex items-center gap-1 rounded-full border border-emerald-500/20 bg-emerald-500/10 px-2 py-0.5 text-[10px] text-emerald-400">
-                                {tx.transaction_mode}
-                              </span>
+                    return (
+                      <div
+                        key={tx.id}
+                        className="flex flex-col justify-between gap-4 p-5 transition-all duration-200 hover:bg-card/30 sm:flex-row sm:items-center"
+                      >
+                        <div className="flex items-center gap-4">
+                          <div
+                            className={`flex h-12 w-12 items-center justify-center rounded-2xl border text-lg ${isIncome
+                                ? "border-emerald-500/10 bg-emerald-500/10 text-emerald-500"
+                                : "border-red-500/10 bg-red-500/10 text-red-500"
+                              }`}
+                          >
+                            {isIncome ? (
+                              <ArrowDownLeft
+                                size={20}
+                              />
+                            ) : (
+                              <ArrowUpRight
+                                size={20}
+                              />
                             )}
                           </div>
 
-                          <p className="mt-1 text-xs sx-muted">
-                            {formatDate(tx.transaction_date)} • via SpendX
-                            Ledger
-                          </p>
+                          <div>
+                            <div className="flex flex-wrap items-center gap-2">
+                              <h4 className="text-sm font-bold sx-title">
+                                {title}
+                              </h4>
+
+                              {tx.transaction_mode && (
+                                <span className="flex items-center gap-1 rounded-full border border-emerald-500/20 bg-emerald-500/10 px-2 py-0.5 text-[10px] text-emerald-400">
+                                  {
+                                    tx.transaction_mode
+                                  }
+                                </span>
+                              )}
+                            </div>
+
+                            <p className="mt-1 text-xs sx-muted">
+                              {formatDate(
+                                tx.transaction_date
+                              )}{" "}
+                              • via SpendX
+                              Ledger
+                            </p>
+                          </div>
+                        </div>
+
+                        <div className="flex items-center justify-between gap-6 sm:justify-end">
+                          <div className="sm:text-right">
+                            <p
+                              className={`font-mono text-base font-bold ${isIncome
+                                  ? "text-emerald-500"
+                                  : "text-red-500"
+                                }`}
+                            >
+                              {isIncome
+                                ? "+"
+                                : "-"}
+                              {formatCurrency(
+                                amountNumber,
+                                currency
+                              )}
+                            </p>
+
+                            <span className="text-[10px] sx-muted">
+                              Settled
+                            </span>
+                          </div>
+
+                          <div className="flex items-center gap-2">
+                            <button
+                              type="button"
+                              onClick={() =>
+                                handleEditTransaction(
+                                  tx
+                                )
+                              }
+                              className="rounded-xl border border-border p-2 sx-muted transition-colors hover:border-emerald-500/20 hover:bg-emerald-500/10 hover:text-emerald-400"
+                              aria-label="Edit transaction"
+                            >
+                              <Pencil
+                                size={16}
+                              />
+                            </button>
+
+                            <button
+                              type="button"
+                              onClick={() =>
+                                handleDeleteTransaction(
+                                  tx.id
+                                )
+                              }
+                              disabled={
+                                deletingId ===
+                                tx.id
+                              }
+                              className="rounded-xl border border-border p-2 sx-muted transition-colors hover:border-red-500/20 hover:bg-red-500/10 hover:text-red-400 disabled:opacity-50"
+                              aria-label="Delete transaction"
+                            >
+                              {deletingId ===
+                                tx.id ? (
+                                <Loader2
+                                  size={16}
+                                  className="animate-spin"
+                                />
+                              ) : (
+                                <Trash2
+                                  size={16}
+                                />
+                              )}
+                            </button>
+                          </div>
                         </div>
                       </div>
-
-                      <div className="flex items-center justify-between gap-6 sm:justify-end">
-                        <div className="sm:text-right">
-                          <p
-                            className={`font-mono text-base font-bold ${isIncome
-                              ? "text-emerald-500"
-                              : "text-red-500"
-                              }`}
-                          >
-                            {isIncome ? "+" : "-"}
-                            {formatCurrency(amountNumber)}
-                          </p>
-
-                          <span className="text-[10px] sx-muted">
-                            Settled
-                          </span>
-                        </div>
-
-                        <div className="flex items-center gap-2">
-                          <button
-                            type="button"
-                            onClick={() => handleEditTransaction(tx)}
-                            className="rounded-xl border border-border p-2 sx-muted transition-colors hover:border-emerald-500/20 hover:bg-emerald-500/10 hover:text-emerald-400"
-                            aria-label="Edit transaction"
-                          >
-                            <Pencil size={16} />
-                          </button>
-
-                          <button
-                            type="button"
-                            onClick={() => handleDeleteTransaction(tx.id)}
-                            disabled={deletingId === tx.id}
-                            className="rounded-xl border border-border p-2 sx-muted transition-colors hover:border-red-500/20 hover:bg-red-500/10 hover:text-red-400 disabled:opacity-50"
-                            aria-label="Delete transaction"
-                          >
-                            {deletingId === tx.id ? (
-                              <Loader2 size={16} className="animate-spin" />
-                            ) : (
-                              <Trash2 size={16} />
-                            )}
-                          </button>
-                        </div>
-                      </div>
-                    </div>
-                  );
-                })}
+                    );
+                  }
+                )}
               </div>
             )}
           </div>
@@ -1409,6 +1818,6 @@ export default function Transactions() {
 
         <LiquidGlassNavbar />
       </div>
-    </AuthGuard >
+    </AuthGuard>
   );
 }
