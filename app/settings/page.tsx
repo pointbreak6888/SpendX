@@ -35,6 +35,7 @@ type ActivePanel =
   | "payments"
   | "alerts"
   | "security"
+  | "spendingLimit"
   | "localization"
   | "appearance";
 
@@ -161,6 +162,11 @@ export default function Settings() {
 
   const [paymentConnected, setPaymentConnected] = useState(false);
 
+  // Monthly spending limit is stored in
+  // monthly_spending_limits.monthly_limit.
+  const [monthlyLimit, setMonthlyLimit] = useState("");
+  const [savingMonthlyLimit, setSavingMonthlyLimit] = useState(false);
+
   const [loading, setLoading] = useState(true);
   const [savingProfile, setSavingProfile] = useState(false);
   const [savingPreferences, setSavingPreferences] = useState(false);
@@ -201,6 +207,12 @@ export default function Settings() {
           name: "Security Protocols",
           desc: "Adjust security and access preferences",
           icon: Shield,
+        },
+        {
+          id: "spendingLimit" as ActivePanel,
+          name: "Monthly Spending Limit",
+          desc: "Set a limit to control your monthly expenses",
+          icon: CreditCard,
         },
         {
           id: "localization" as ActivePanel,
@@ -283,10 +295,7 @@ export default function Settings() {
           setLanguage(parsed.language ?? "English");
           setPaymentConnected(parsed.paymentConnected ?? false);
         } catch (parseError) {
-          console.error(
-            "Parse saved settings error:",
-            parseError
-          );
+          console.error("Parse saved settings error:", parseError);
         }
       }
 
@@ -305,8 +314,7 @@ export default function Settings() {
       if (profileError) {
         console.error("Load currency error:", profileError);
       } else if (profileSettings?.currency) {
-        const savedCurrency =
-          profileSettings.currency as CurrencyCode;
+        const savedCurrency = profileSettings.currency as CurrencyCode;
 
         /*
          * Only accept currencies supported by the application.
@@ -322,6 +330,32 @@ export default function Settings() {
         }
       } else {
         setCurrency("INR");
+      }
+
+      /*
+       * Load the user's monthly spending limit.
+       *
+       * The limit is stored separately from the profile
+       * in monthly_spending_limits.
+       */
+      const {
+        data: spendingLimitSettings,
+        error: spendingLimitError,
+      } = await supabase
+        .from("monthly_spending_limits")
+        .select("monthly_limit")
+        .eq("user_id", user.id)
+        .maybeSingle();
+
+      if (spendingLimitError) {
+        console.error(
+          "Load monthly spending limit error:",
+          spendingLimitError
+        );
+      } else if (spendingLimitSettings?.monthly_limit != null) {
+        setMonthlyLimit(String(spendingLimitSettings.monthly_limit));
+      } else {
+        setMonthlyLimit("");
       }
     } catch (error) {
       console.error("Load settings error:", error);
@@ -498,10 +532,7 @@ export default function Settings() {
         `Localization settings saved successfully. Currency: ${currency}`
       );
     } catch (error) {
-      console.error(
-        "Save preferences error:",
-        error
-      );
+      console.error("Save preferences error:", error);
 
       if (error instanceof Error) {
         setErrorMessage(error.message);
@@ -512,6 +543,88 @@ export default function Settings() {
       }
     } finally {
       setSavingPreferences(false);
+    }
+  }
+
+  /*
+   * Save the monthly spending limit.
+   *
+   * The limit is stored in monthly_spending_limits and
+   * automatically remains active for future months until
+   * the user changes it.
+   */
+  async function saveMonthlySpendingLimit() {
+    try {
+      setSavingMonthlyLimit(true);
+      setMessage("");
+      setErrorMessage("");
+
+      const {
+        data: { user },
+        error: userError,
+      } = await supabase.auth.getUser();
+
+      if (userError) {
+        throw new Error(userError.message);
+      }
+
+      if (!user) {
+        throw new Error(
+          "You must be logged in to save your spending limit."
+        );
+      }
+
+      if (!monthlyLimit.trim()) {
+        throw new Error(
+          "Please enter a monthly spending limit."
+        );
+      }
+
+      const parsedLimit = Number(monthlyLimit);
+
+      if (!Number.isFinite(parsedLimit) || parsedLimit <= 0) {
+        throw new Error(
+          "Monthly spending limit must be greater than zero."
+        );
+      }
+
+      const { error } = await supabase
+        .from("monthly_spending_limits")
+        .upsert(
+          {
+            user_id: user.id,
+            monthly_limit: parsedLimit,
+            updated_at: new Date().toISOString(),
+          },
+          {
+            onConflict: "user_id",
+          }
+        );
+
+      if (error) {
+        throw new Error(error.message);
+      }
+
+      setMonthlyLimit(parsedLimit.toString());
+
+      setMessage(
+        "Monthly spending limit saved successfully."
+      );
+    } catch (error) {
+      console.error(
+        "Save monthly spending limit error:",
+        error
+      );
+
+      if (error instanceof Error) {
+        setErrorMessage(error.message);
+      } else {
+        setErrorMessage(
+          "Something went wrong while saving your spending limit."
+        );
+      }
+    } finally {
+      setSavingMonthlyLimit(false);
     }
   }
 
@@ -563,9 +676,7 @@ export default function Settings() {
       .split(" ")
       .filter(Boolean)
       .slice(0, 2)
-      .map((part) =>
-        part[0]?.toUpperCase()
-      )
+      .map((part) => part[0]?.toUpperCase())
       .join("");
   }, [profile]);
 
@@ -646,8 +757,7 @@ export default function Settings() {
                     </h3>
 
                     <p className="mt-1 text-xs sx-muted">
-                      {profile?.email ||
-                        "No email found"}
+                      {profile?.email || "No email found"}
                     </p>
 
                     <span className="mt-2 inline-block rounded-full border border-emerald-500/20 bg-emerald-500/10 px-2.5 py-0.5 font-mono text-[9px] font-semibold uppercase tracking-wider text-emerald-400">
@@ -769,8 +879,7 @@ export default function Settings() {
                                       value={displayName}
                                       onChange={(event) =>
                                         setDisplayName(
-                                          event.target
-                                            .value
+                                          event.target.value
                                         )
                                       }
                                       placeholder="Enter your display name"
@@ -786,8 +895,7 @@ export default function Settings() {
                                     <input
                                       type="email"
                                       value={
-                                        profile?.email ||
-                                        ""
+                                        profile?.email || ""
                                       }
                                       disabled
                                       className="sx-field w-full cursor-not-allowed rounded-xl px-4 py-3 text-sm opacity-70"
@@ -796,9 +904,7 @@ export default function Settings() {
 
                                   <button
                                     type="submit"
-                                    disabled={
-                                      savingProfile
-                                    }
+                                    disabled={savingProfile}
                                     className="sx-primary-button flex items-center justify-center gap-2 rounded-xl px-5 py-3 text-sm font-bold transition-transform hover:-translate-y-0.5 disabled:cursor-not-allowed disabled:opacity-60"
                                   >
                                     {savingProfile ? (
@@ -928,9 +1034,7 @@ export default function Settings() {
                                       </div>
 
                                       <SettingToggle
-                                        checked={
-                                          emailAlerts
-                                        }
+                                        checked={emailAlerts}
                                         onChange={() =>
                                           setEmailAlerts(
                                             (current) =>
@@ -954,9 +1058,7 @@ export default function Settings() {
                                       </div>
 
                                       <SettingToggle
-                                        checked={
-                                          pushAlerts
-                                        }
+                                        checked={pushAlerts}
                                         onChange={() =>
                                           setPushAlerts(
                                             (current) =>
@@ -980,9 +1082,7 @@ export default function Settings() {
                                       </div>
 
                                       <SettingToggle
-                                        checked={
-                                          smsAlerts
-                                        }
+                                        checked={smsAlerts}
                                         onChange={() =>
                                           setSmsAlerts(
                                             (current) =>
@@ -1048,9 +1148,7 @@ export default function Settings() {
                                       </div>
 
                                       <SettingToggle
-                                        checked={
-                                          twoFactor
-                                        }
+                                        checked={twoFactor}
                                         onChange={() =>
                                           setTwoFactor(
                                             (current) =>
@@ -1075,9 +1173,7 @@ export default function Settings() {
                                       </div>
 
                                       <SettingToggle
-                                        checked={
-                                          biometricLock
-                                        }
+                                        checked={biometricLock}
                                         onChange={() =>
                                           setBiometricLock(
                                             (current) =>
@@ -1107,6 +1203,108 @@ export default function Settings() {
                                       <Shield size={16} />
                                     )}
                                     Save Security Settings
+                                  </button>
+                                </div>
+                              )}
+
+                              {/* MONTHLY SPENDING LIMIT */}
+                              {item.id === "spendingLimit" && (
+                                <div className="space-y-6">
+                                  <div>
+                                    <h2 className="font-mono text-xl font-bold sx-title">
+                                      Monthly Spending Limit
+                                    </h2>
+
+                                    <p className="mt-2 text-sm sx-muted">
+                                      Set a monthly spending
+                                      limit to help control
+                                      your expenses and avoid
+                                      overspending.
+                                    </p>
+                                  </div>
+
+                                  <div>
+                                    <label className="mb-2 block font-mono text-xs sx-muted">
+                                      Monthly Limit ({currency})
+                                    </label>
+
+                                    <input
+                                      type="number"
+                                      min="0.01"
+                                      step="0.01"
+                                      value={monthlyLimit}
+                                      onChange={(event) =>
+                                        setMonthlyLimit(
+                                          event.target.value
+                                        )
+                                      }
+                                      placeholder="Enter monthly spending limit"
+                                      className="sx-field w-full rounded-xl px-4 py-3 text-sm placeholder:text-muted-foreground"
+                                    />
+
+                                    <p className="mt-2 text-xs sx-muted">
+                                      This limit will
+                                      automatically apply to
+                                      each month until you
+                                      change it.
+                                    </p>
+                                  </div>
+
+                                  {monthlyLimit &&
+                                    Number(monthlyLimit) > 0 && (
+                                      <div className="sx-panel rounded-xl p-5">
+                                        <div className="flex items-center justify-between gap-4">
+                                          <div>
+                                            <p className="text-xs sx-muted">
+                                              Current monthly
+                                              limit
+                                            </p>
+
+                                            <p className="mt-1 font-mono text-xl font-bold sx-title">
+                                              {currency}{" "}
+                                              {Number(
+                                                monthlyLimit
+                                              ).toLocaleString(
+                                                undefined,
+                                                {
+                                                  minimumFractionDigits: 2,
+                                                  maximumFractionDigits: 2,
+                                                }
+                                              )}
+                                            </p>
+                                          </div>
+
+                                          <span className="rounded-full border border-emerald-500/20 bg-emerald-500/10 px-3 py-1 text-xs font-semibold text-emerald-300">
+                                            Active
+                                          </span>
+                                        </div>
+                                      </div>
+                                    )}
+
+                                  <button
+                                    type="button"
+                                    onClick={
+                                      saveMonthlySpendingLimit
+                                    }
+                                    disabled={
+                                      savingMonthlyLimit
+                                    }
+                                    className="sx-primary-button flex items-center gap-2 rounded-xl px-5 py-3 text-sm font-bold transition-transform hover:-translate-y-0.5 disabled:cursor-not-allowed disabled:opacity-60"
+                                  >
+                                    {savingMonthlyLimit ? (
+                                      <>
+                                        <Loader2
+                                          size={16}
+                                          className="animate-spin"
+                                        />
+                                        Saving...
+                                      </>
+                                    ) : (
+                                      <>
+                                        <Save size={16} />
+                                        Save Spending Limit
+                                      </>
+                                    )}
                                   </button>
                                 </div>
                               )}
@@ -1143,12 +1341,8 @@ export default function Settings() {
                                       {currencies.map(
                                         (item) => (
                                           <option
-                                            key={
-                                              item.code
-                                            }
-                                            value={
-                                              item.code
-                                            }
+                                            key={item.code}
+                                            value={item.code}
                                           >
                                             {item.code} —{" "}
                                             {item.name}
@@ -1167,8 +1361,7 @@ export default function Settings() {
                                       value={language}
                                       onChange={(event) =>
                                         setLanguage(
-                                          event.target
-                                            .value
+                                          event.target.value
                                         )
                                       }
                                       className="sx-field w-full rounded-xl px-4 py-3 text-sm"
@@ -1253,8 +1446,7 @@ export default function Settings() {
                                   <div className="sx-panel flex flex-col gap-5 rounded-xl p-5 sm:flex-row sm:items-center sm:justify-between">
                                     <div className="flex min-w-0 items-center gap-4">
                                       <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl border border-primary/20 bg-primary/10 text-primary">
-                                        {theme ===
-                                          "dark" ? (
+                                        {theme === "dark" ? (
                                           <Moon size={20} />
                                         ) : (
                                           <Sun size={20} />
@@ -1263,8 +1455,7 @@ export default function Settings() {
 
                                       <div className="min-w-0">
                                         <h3 className="text-sm font-bold sx-title">
-                                          {theme ===
-                                            "dark"
+                                          {theme === "dark"
                                             ? "Dark Mode"
                                             : "Light Mode"}
                                         </h3>
