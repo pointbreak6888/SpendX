@@ -748,16 +748,9 @@ export default function DashboardPage() {
                   </div>
                 </div>
 
-                {/* Percentage + Remaining */}
+                {/* Remaining Amount */}
                 <div>
-                  <div className="mb-2 flex items-center justify-between gap-4 text-sm">
-                    <span className="sx-muted">
-                      {dashboardData.spendingLimitPercentage.toFixed(
-                        0
-                      )}
-                      % used
-                    </span>
-
+                  <div className="mb-2 flex items-center justify-end text-sm">
                     <span
                       className={`font-mono font-semibold ${dashboardData.spendingLimitExceeded ||
                           dashboardData.spendingLimitCritical
