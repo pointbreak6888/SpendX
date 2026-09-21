@@ -28,14 +28,17 @@ export default function AuthGuard({
             setChecking(false);
         }
 
-        checkAuth();
+        void checkAuth();
     }, [router]);
 
     if (checking) {
         return (
             <main className="sx-screen flex items-center justify-center px-6">
                 <div className="flex items-center gap-3 rounded-2xl border border-white/10 bg-white/[0.03] px-6 py-4 text-sm text-zinc-300">
-                    <Loader2 size={18} className="animate-spin text-indigo-400" />
+                    <Loader2
+                        size={18}
+                        className="animate-spin text-indigo-400"
+                    />
                     Checking access...
                 </div>
             </main>

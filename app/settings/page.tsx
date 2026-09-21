@@ -20,6 +20,7 @@ import {
   Save,
   Check,
   X,
+  Fingerprint,
 } from "lucide-react";
 
 // IMPORTANT:
@@ -29,6 +30,13 @@ import { supabase } from "@/lib/supabase";
 
 import { useTheme } from "@/components/theme-provider";
 import { currencies, type CurrencyCode } from "@/lib/currencies";
+import {
+  authenticateBiometric,
+  clearStoredBiometricCredential,
+  getStoredBiometricCredentialId,
+  isBiometricSupported,
+  registerBiometric,
+} from "@/lib/biometric";
 
 type ActivePanel =
   | "profile"
@@ -52,7 +60,7 @@ function SettingToggle({
   label,
 }: {
   checked: boolean;
-  onChange: () => void;
+  onChange: () => void | Promise<void>;
   label?: string;
 }) {
   return (
@@ -62,8 +70,8 @@ function SettingToggle({
       aria-pressed={checked}
       onClick={onChange}
       className={`relative h-7 w-12 shrink-0 overflow-hidden rounded-full border transition-colors ${checked
-          ? "border-emerald-400/40 bg-emerald-500"
-          : "border-border bg-muted"
+        ? "border-emerald-400/40 bg-emerald-500"
+        : "border-border bg-muted"
         }`}
     >
       <span
@@ -153,6 +161,10 @@ export default function Settings() {
 
   const [twoFactor, setTwoFactor] = useState(false);
   const [biometricLock, setBiometricLock] = useState(false);
+  const [biometricAvailable, setBiometricAvailable] = useState<
+    boolean | null
+  >(null);
+  const [biometricBusy, setBiometricBusy] = useState(false);
 
   // Currency is stored in profiles.currency.
   // Database transaction amounts are NOT modified.
@@ -291,7 +303,19 @@ export default function Settings() {
           setPushAlerts(parsed.pushAlerts ?? false);
           setSmsAlerts(parsed.smsAlerts ?? false);
           setTwoFactor(parsed.twoFactor ?? false);
-          setBiometricLock(parsed.biometricLock ?? false);
+
+          const savedBiometricLock =
+            parsed.biometricLock ?? false;
+
+          /*
+           * A saved preference is only considered active when this
+           * browser still has the registered WebAuthn credential ID.
+           */
+          setBiometricLock(
+            savedBiometricLock &&
+            Boolean(getStoredBiometricCredentialId())
+          );
+
           setLanguage(parsed.language ?? "English");
           setPaymentConnected(parsed.paymentConnected ?? false);
         } catch (parseError) {
@@ -425,6 +449,214 @@ export default function Settings() {
       setSavingProfile(false);
     }
   }
+
+  async function persistBiometricPreference(enabled: boolean) {
+    const savedSettings = localStorage.getItem("spendx-settings");
+
+    let existingSettings: Record<string, unknown> = {};
+
+    if (savedSettings) {
+      try {
+        const parsed = JSON.parse(savedSettings);
+
+        if (
+          parsed &&
+          typeof parsed === "object" &&
+          !Array.isArray(parsed)
+        ) {
+          existingSettings = parsed;
+        }
+      } catch {
+        existingSettings = {};
+      }
+    }
+
+    localStorage.setItem(
+      "spendx-settings",
+      JSON.stringify({
+        ...existingSettings,
+        emailAlerts,
+        pushAlerts,
+        smsAlerts,
+        twoFactor,
+        biometricLock: enabled,
+        language,
+        paymentConnected,
+      })
+    );
+  }
+
+  async function handleBiometricToggle() {
+    setMessage("");
+    setErrorMessage("");
+
+    if (biometricBusy) {
+      return;
+    }
+
+    /*
+     * Disabling the lock does not remove the device's WebAuthn
+     * credential. It only disables SpendX's use of it. The private
+     * key remains protected by the platform authenticator.
+     */
+    if (biometricLock) {
+      clearStoredBiometricCredential();
+      setBiometricLock(false);
+
+      await persistBiometricPreference(false);
+
+      setMessage("Biometric Lock disabled.");
+      return;
+    }
+
+    if (!profile) {
+      setErrorMessage(
+        "Your account is still loading. Please try again."
+      );
+      return;
+    }
+
+    try {
+      setBiometricBusy(true);
+
+      const supported = await isBiometricSupported();
+      setBiometricAvailable(supported);
+
+      if (!supported) {
+        throw new Error(
+          "Biometric authentication is not supported or available on this device."
+        );
+      }
+
+      await registerBiometric(
+        profile.id,
+        profile.email,
+        profile.full_name
+      );
+
+      /*
+       * Registration requires user verification. We also perform a
+       * real authentication immediately so the feature is verified
+       * before the preference is switched on.
+       */
+      const verified = await authenticateBiometric();
+
+      if (!verified) {
+        clearStoredBiometricCredential();
+        throw new Error(
+          "Biometric verification could not be completed. Biometric Lock remains disabled."
+        );
+      }
+
+      setBiometricLock(true);
+      await persistBiometricPreference(true);
+
+      setMessage(
+        "Biometric Lock enabled successfully. Your device will verify you with its available biometric or device authenticator."
+      );
+    } catch (error) {
+      console.error("Enable biometric lock error:", error);
+
+      clearStoredBiometricCredential();
+      setBiometricLock(false);
+
+      if (
+        error instanceof DOMException &&
+        error.name === "NotAllowedError"
+      ) {
+        setErrorMessage(
+          "Biometric verification was cancelled or not completed. Biometric Lock remains disabled."
+        );
+      } else if (error instanceof Error) {
+        setErrorMessage(error.message);
+      } else {
+        setErrorMessage(
+          "Unable to enable Biometric Lock on this device."
+        );
+      }
+    } finally {
+      setBiometricBusy(false);
+    }
+  }
+
+  async function handleBiometricVerification() {
+    setMessage("");
+    setErrorMessage("");
+
+    if (!biometricLock) {
+      setErrorMessage(
+        "Enable Biometric Lock before testing verification."
+      );
+      return;
+    }
+
+    try {
+      setBiometricBusy(true);
+
+      const verified = await authenticateBiometric();
+
+      if (!verified) {
+        throw new Error(
+          "Biometric verification could not be completed."
+        );
+      }
+
+      setMessage("Biometric verification successful.");
+    } catch (error) {
+      console.error("Biometric verification error:", error);
+
+      if (
+        error instanceof DOMException &&
+        error.name === "NotAllowedError"
+      ) {
+        setErrorMessage(
+          "Biometric verification was cancelled or failed."
+        );
+      } else if (error instanceof Error) {
+        setErrorMessage(error.message);
+      } else {
+        setErrorMessage(
+          "Biometric verification failed."
+        );
+      }
+    } finally {
+      setBiometricBusy(false);
+    }
+  }
+
+  /*
+   * Check biometric capability when the settings page is opened.
+   * WebAuthn requires a secure context (HTTPS or localhost).
+   */
+  useEffect(() => {
+    let cancelled = false;
+
+    async function checkBiometricSupport() {
+      try {
+        const supported: boolean =
+          await isBiometricSupported();
+
+        if (!cancelled) {
+          setBiometricAvailable(supported);
+        }
+      } catch (error) {
+        console.error(
+          "Check biometric support error:",
+          error
+        );
+
+        if (!cancelled) {
+          setBiometricAvailable(false);
+        }
+      }
+    }
+
+    void checkBiometricSupport();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   /*
    * Save all preferences.
@@ -813,15 +1045,15 @@ export default function Settings() {
                               toggleExpanded(item.id)
                             }
                             className={`flex w-full items-center justify-between border-b border-border/60 p-5 text-left transition-colors last:border-b-0 ${isExpanded
-                                ? "bg-primary/10"
-                                : "hover:bg-primary/5"
+                              ? "bg-primary/10"
+                              : "hover:bg-primary/5"
                               }`}
                           >
                             <div className="flex items-center gap-4">
                               <div
                                 className={`rounded-2xl border p-3 transition-colors ${isExpanded
-                                    ? "border-indigo-500/30 bg-indigo-500/10 text-indigo-300"
-                                    : "border-border bg-muted/60 text-muted-foreground"
+                                  ? "border-indigo-500/30 bg-indigo-500/10 text-indigo-300"
+                                  : "border-border bg-muted/60 text-muted-foreground"
                                   }`}
                               >
                                 <Icon size={18} />
@@ -841,8 +1073,8 @@ export default function Settings() {
                             <ChevronDown
                               size={16}
                               className={`transition-transform ${isExpanded
-                                  ? "rotate-180 text-primary"
-                                  : "text-muted-foreground"
+                                ? "rotate-180 text-primary"
+                                : "text-muted-foreground"
                                 }`}
                             />
                           </button>
@@ -956,8 +1188,8 @@ export default function Settings() {
 
                                       <span
                                         className={`rounded-full px-3 py-1 text-xs font-semibold ${paymentConnected
-                                            ? "bg-emerald-500/10 text-emerald-300"
-                                            : "bg-muted text-muted-foreground"
+                                          ? "bg-emerald-500/10 text-emerald-300"
+                                          : "bg-muted text-muted-foreground"
                                           }`}
                                       >
                                         {paymentConnected
@@ -1158,29 +1390,103 @@ export default function Settings() {
                                       />
                                     </div>
 
-                                    <div className="sx-panel flex items-center justify-between gap-4 rounded-xl p-5">
-                                      <div className="min-w-0">
-                                        <h3 className="text-sm font-bold sx-title">
-                                          Biometric Lock
-                                        </h3>
+                                    <div className="sx-panel rounded-xl p-5">
+                                      <div className="flex items-center justify-between gap-4">
+                                        <div className="flex min-w-0 items-start gap-3">
+                                          <div className="mt-0.5 rounded-xl border border-primary/20 bg-primary/10 p-2 text-primary">
+                                            <Fingerprint size={18} />
+                                          </div>
 
-                                        <p className="mt-1 text-xs sx-muted">
-                                          Save biometric
-                                          lock preference
-                                          for supported
-                                          devices later.
-                                        </p>
+                                          <div className="min-w-0">
+                                            <h3 className="text-sm font-bold sx-title">
+                                              Biometric Lock
+                                            </h3>
+
+                                            <p className="mt-1 text-xs sx-muted">
+                                              Require your device&apos;s
+                                              biometric or user-verifying
+                                              platform authenticator when
+                                              SpendX requests biometric
+                                              verification.
+                                            </p>
+                                          </div>
+                                        </div>
+
+                                        <div className="flex shrink-0 items-center gap-3">
+                                          {biometricBusy && (
+                                            <Loader2
+                                              size={16}
+                                              className="animate-spin text-primary"
+                                            />
+                                          )}
+
+                                          <SettingToggle
+                                            checked={biometricLock}
+                                            onChange={
+                                              handleBiometricToggle
+                                            }
+                                            label={
+                                              biometricLock
+                                                ? "Disable Biometric Lock"
+                                                : "Enable Biometric Lock"
+                                            }
+                                          />
+                                        </div>
                                       </div>
 
-                                      <SettingToggle
-                                        checked={biometricLock}
-                                        onChange={() =>
-                                          setBiometricLock(
-                                            (current) =>
-                                              !current
-                                          )
-                                        }
-                                      />
+                                      <div className="mt-4 rounded-xl border border-border/60 bg-background/30 px-4 py-3">
+                                        <div className="flex items-center justify-between gap-4">
+                                          <div>
+                                            <p className="text-xs font-semibold sx-title">
+                                              Device support
+                                            </p>
+
+                                            <p className="mt-1 text-[11px] sx-muted">
+                                              {biometricAvailable === null
+                                                ? "Checking device support..."
+                                                : biometricAvailable
+                                                  ? "A user-verifying platform authenticator is available."
+                                                  : "Biometric authentication is unavailable on this device or browser."}
+                                            </p>
+                                          </div>
+
+                                          <span
+                                            className={`rounded-full px-3 py-1 text-[10px] font-semibold ${biometricAvailable === true
+                                              ? "bg-emerald-500/10 text-emerald-300"
+                                              : biometricAvailable === false
+                                                ? "bg-red-500/10 text-red-300"
+                                                : "bg-muted text-muted-foreground"
+                                              }`}
+                                          >
+                                            {biometricAvailable === true
+                                              ? "Available"
+                                              : biometricAvailable === false
+                                                ? "Unavailable"
+                                                : "Checking"}
+                                          </span>
+                                        </div>
+                                      </div>
+
+                                      {biometricLock && (
+                                        <button
+                                          type="button"
+                                          onClick={
+                                            handleBiometricVerification
+                                          }
+                                          disabled={biometricBusy}
+                                          className="sx-secondary-button mt-4 flex items-center gap-2 rounded-xl px-4 py-2.5 text-xs font-semibold disabled:cursor-not-allowed disabled:opacity-60"
+                                        >
+                                          {biometricBusy ? (
+                                            <Loader2
+                                              size={14}
+                                              className="animate-spin"
+                                            />
+                                          ) : (
+                                            <Fingerprint size={14} />
+                                          )}
+                                          Test Biometric Verification
+                                        </button>
+                                      )}
                                     </div>
                                   </div>
 
