@@ -9,6 +9,7 @@ import {
   useCallback,
   useEffect,
   useMemo,
+  useRef,
   useState,
   type FormEvent,
 } from "react";
@@ -219,6 +220,13 @@ export default function Transactions() {
   const [editingTransaction, setEditingTransaction] =
     useState<Transaction | null>(null);
 
+  /*
+   * References used for automatically scrolling to the
+   * transaction form when an existing transaction is edited.
+   */
+  const editFormRef = useRef<HTMLFormElement>(null);
+  const firstInputRef = useRef<HTMLInputElement>(null);
+
   const [recurringTransactions, setRecurringTransactions] =
     useState<RecurringTransaction[]>([]);
 
@@ -276,14 +284,6 @@ export default function Transactions() {
     }
   }, [router]);
 
-  /*
-   * Load the user's selected currency from the profiles table.
-   *
-   * IMPORTANT:
-   * We use the existing shared Supabase client here.
-   * This keeps authentication consistent with Dashboard,
-   * Settings and the rest of the application.
-   */
   const loadCurrency = useCallback(async () => {
     try {
       const {
@@ -439,6 +439,61 @@ export default function Transactions() {
     setTransactionDate(tx.transaction_date);
     setErrorMessage("");
   }
+
+  /*
+   * Automatically scroll to the edit form after React has
+   * rendered the selected transaction into the form.
+   *
+   * requestAnimationFrame is important here because
+   * setEditingTransaction() is asynchronous. Scrolling
+   * directly inside handleEditTransaction() can happen
+   * before the form has finished updating.
+   */
+  useEffect(() => {
+    if (!editingTransaction) {
+      return;
+    }
+
+    const frameId = window.requestAnimationFrame(() => {
+      const form = editFormRef.current;
+
+      if (!form) {
+        return;
+      }
+
+      /*
+       * Keep the form below the fixed/header area.
+       * The page uses a large top header, so 120px provides
+       * enough spacing without hiding the form underneath it.
+       */
+      const headerOffset = 120;
+
+      const formTop =
+        form.getBoundingClientRect().top +
+        window.scrollY -
+        headerOffset;
+
+      window.scrollTo({
+        top: Math.max(0, formTop),
+        behavior: "smooth",
+      });
+
+      /*
+       * Focus the first input after the smooth scroll has
+       * started. preventScroll keeps focus from jumping
+       * the page again.
+       */
+      window.setTimeout(() => {
+        firstInputRef.current?.focus({
+          preventScroll: true,
+        });
+      }, 400);
+    });
+
+    return () => {
+      window.cancelAnimationFrame(frameId);
+    };
+  }, [editingTransaction]);
 
   async function handleDeleteTransaction(id: string) {
     try {
@@ -909,6 +964,7 @@ export default function Transactions() {
           )}
 
           <form
+            ref={editFormRef}
             onSubmit={handleAddTransaction}
             className="relative z-50 mb-8 sx-card rounded-3xl p-6"
           >
@@ -936,8 +992,8 @@ export default function Transactions() {
                     setErrorMessage("");
                   }}
                   className={`rounded-xl px-4 py-2 text-xs font-semibold transition-colors ${type === "expense"
-                      ? "bg-red-500/20 text-red-400"
-                      : "sx-muted hover:sx-title"
+                    ? "bg-red-500/20 text-red-400"
+                    : "sx-muted hover:sx-title"
                     }`}
                 >
                   Expense
@@ -951,8 +1007,8 @@ export default function Transactions() {
                     setErrorMessage("");
                   }}
                   className={`rounded-xl px-4 py-2 text-xs font-semibold transition-colors ${type === "income"
-                      ? "bg-emerald-500/20 text-emerald-400"
-                      : "sx-muted hover:sx-title"
+                    ? "bg-emerald-500/20 text-emerald-400"
+                    : "sx-muted hover:sx-title"
                     }`}
                 >
                   Income
@@ -963,6 +1019,7 @@ export default function Transactions() {
             <div className="grid grid-cols-1 gap-4 md:grid-cols-5">
               <div>
                 <input
+                  ref={firstInputRef}
                   type="text"
                   inputMode="decimal"
                   value={amount}
@@ -1021,12 +1078,8 @@ export default function Transactions() {
                 }
                 className="sx-field w-full rounded-2xl px-4 py-3 text-sm"
               >
-                <option value="UPI">
-                  UPI
-                </option>
-                <option value="Cash">
-                  Cash
-                </option>
+                <option value="UPI">UPI</option>
+                <option value="Cash">Cash</option>
                 <option value="Credit Card">
                   Credit Card
                 </option>
@@ -1074,9 +1127,7 @@ export default function Transactions() {
                         className="rounded-xl border border-border p-2 sx-muted hover:bg-card/60 hover:sx-title"
                         aria-label="Previous month"
                       >
-                        <ChevronLeft
-                          size={16}
-                        />
+                        <ChevronLeft size={16} />
                       </button>
 
                       <p className="font-mono text-sm font-semibold sx-title">
@@ -1097,9 +1148,7 @@ export default function Transactions() {
                         className="rounded-xl border border-border p-2 sx-muted hover:bg-card/60 hover:sx-title"
                         aria-label="Next month"
                       >
-                        <ChevronRight
-                          size={16}
-                        />
+                        <ChevronRight size={16} />
                       </button>
                     </div>
 
@@ -1150,10 +1199,10 @@ export default function Transactions() {
                                 )
                               }
                               className={`flex h-10 flex-col items-center justify-center rounded-xl text-sm transition-colors ${selected
-                                  ? "bg-emerald-500 font-bold text-black"
-                                  : today
-                                    ? "border border-emerald-500/30 bg-emerald-500/10 text-emerald-400"
-                                    : "sx-muted hover:bg-card/60 hover:sx-title"
+                                ? "bg-emerald-500 font-bold text-black"
+                                : today
+                                  ? "border border-emerald-500/30 bg-emerald-500/10 text-emerald-400"
+                                  : "sx-muted hover:bg-card/60 hover:sx-title"
                                 }`}
                             >
                               <span className="leading-none">
@@ -1264,9 +1313,9 @@ export default function Transactions() {
                         )
                       }
                       className={`rounded-xl px-4 py-2 text-xs font-semibold ${recurringType ===
-                          "expense"
-                          ? "bg-red-500/20 text-red-400"
-                          : "sx-muted"
+                        "expense"
+                        ? "bg-red-500/20 text-red-400"
+                        : "sx-muted"
                         }`}
                     >
                       Expense
@@ -1280,9 +1329,9 @@ export default function Transactions() {
                         )
                       }
                       className={`rounded-xl px-4 py-2 text-xs font-semibold ${recurringType ===
-                          "income"
-                          ? "bg-emerald-500/20 text-emerald-400"
-                          : "sx-muted"
+                        "income"
+                        ? "bg-emerald-500/20 text-emerald-400"
+                        : "sx-muted"
                         }`}
                     >
                       Income
@@ -1332,12 +1381,8 @@ export default function Transactions() {
                     }
                     className="sx-field w-full rounded-2xl px-4 py-3 text-sm"
                   >
-                    <option value="UPI">
-                      UPI
-                    </option>
-                    <option value="Cash">
-                      Cash
-                    </option>
+                    <option value="UPI">UPI</option>
+                    <option value="Cash">Cash</option>
                     <option value="Credit Card">
                       Credit Card
                     </option>
@@ -1457,9 +1502,9 @@ export default function Transactions() {
 
                           <span
                             className={`rounded-full px-2 py-1 text-[10px] font-semibold ${recurring.type ===
-                                "expense"
-                                ? "bg-red-500/10 text-red-400"
-                                : "bg-emerald-500/10 text-emerald-400"
+                              "expense"
+                              ? "bg-red-500/10 text-red-400"
+                              : "bg-emerald-500/10 text-emerald-400"
                               }`}
                           >
                             {recurring.type}
@@ -1467,8 +1512,8 @@ export default function Transactions() {
 
                           <span
                             className={`rounded-full px-2 py-1 text-[10px] font-semibold ${recurring.is_active
-                                ? "bg-emerald-500/10 text-emerald-400"
-                                : "bg-white/5 sx-muted"
+                              ? "bg-emerald-500/10 text-emerald-400"
+                              : "bg-white/5 sx-muted"
                               }`}
                           >
                             {recurring.is_active
@@ -1593,8 +1638,8 @@ export default function Transactions() {
                       setFilterType("all")
                     }
                     className={`w-full rounded-2xl px-4 py-3 text-left text-sm transition-colors ${filterType === "all"
-                        ? "bg-card/60 sx-title"
-                        : "sx-muted hover:bg-card/40 hover:sx-title"
+                      ? "bg-card/60 sx-title"
+                      : "sx-muted hover:bg-card/40 hover:sx-title"
                       }`}
                   >
                     All transactions
@@ -1606,8 +1651,8 @@ export default function Transactions() {
                       setFilterType("income")
                     }
                     className={`w-full rounded-2xl px-4 py-3 text-left text-sm transition-colors ${filterType === "income"
-                        ? "bg-emerald-500/15 text-emerald-400"
-                        : "sx-muted hover:bg-card/40 hover:sx-title"
+                      ? "bg-emerald-500/15 text-emerald-400"
+                      : "sx-muted hover:bg-card/40 hover:sx-title"
                       }`}
                   >
                     Income only
@@ -1619,8 +1664,8 @@ export default function Transactions() {
                       setFilterType("expense")
                     }
                     className={`w-full rounded-2xl px-4 py-3 text-left text-sm transition-colors ${filterType === "expense"
-                        ? "bg-red-500/15 text-red-400"
-                        : "sx-muted hover:bg-card/40 hover:sx-title"
+                      ? "bg-red-500/15 text-red-400"
+                      : "sx-muted hover:bg-card/40 hover:sx-title"
                       }`}
                   >
                     Expenses only
@@ -1701,8 +1746,8 @@ export default function Transactions() {
                         <div className="flex items-center gap-4">
                           <div
                             className={`flex h-12 w-12 items-center justify-center rounded-2xl border text-lg ${isIncome
-                                ? "border-emerald-500/10 bg-emerald-500/10 text-emerald-500"
-                                : "border-red-500/10 bg-red-500/10 text-red-500"
+                              ? "border-emerald-500/10 bg-emerald-500/10 text-emerald-500"
+                              : "border-red-500/10 bg-red-500/10 text-red-500"
                               }`}
                           >
                             {isIncome ? (
@@ -1745,8 +1790,8 @@ export default function Transactions() {
                           <div className="sm:text-right">
                             <p
                               className={`font-mono text-base font-bold ${isIncome
-                                  ? "text-emerald-500"
-                                  : "text-red-500"
+                                ? "text-emerald-500"
+                                : "text-red-500"
                                 }`}
                             >
                               {isIncome
@@ -1774,9 +1819,7 @@ export default function Transactions() {
                               className="rounded-xl border border-border p-2 sx-muted transition-colors hover:border-emerald-500/20 hover:bg-emerald-500/10 hover:text-emerald-400"
                               aria-label="Edit transaction"
                             >
-                              <Pencil
-                                size={16}
-                              />
+                              <Pencil size={16} />
                             </button>
 
                             <button
