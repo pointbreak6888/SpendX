@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { useRouter } from "next/navigation";
+import { useRouter, usePathname } from "next/navigation";
 import { Loader2 } from "lucide-react";
 import { supabase } from "@/lib/supabase";
 
@@ -11,9 +11,12 @@ export default function AuthGuard({
     children: React.ReactNode;
 }) {
     const router = useRouter();
+    const pathname = usePathname();
     const [checking, setChecking] = useState(true);
 
     useEffect(() => {
+        let isMounted = true;
+
         async function checkAuth() {
             const {
                 data: { user },
@@ -21,15 +24,40 @@ export default function AuthGuard({
             } = await supabase.auth.getUser();
 
             if (error || !user) {
-                router.replace("/login");
+                if (isMounted) {
+                    router.replace("/login");
+                }
                 return;
             }
 
-            setChecking(false);
+            const { data: mfaData, error: mfaError } =
+                await supabase.auth.mfa.getAuthenticatorAssuranceLevel();
+
+            if (!mfaError && mfaData) {
+                if (
+                    mfaData.nextLevel === "aal2" &&
+                    mfaData.currentLevel !== "aal2"
+                ) {
+                    if (pathname !== "/auth/verify-2fa") {
+                        if (isMounted) {
+                            router.replace("/auth/verify-2fa");
+                        }
+                        return;
+                    }
+                }
+            }
+
+            if (isMounted) {
+                setChecking(false);
+            }
         }
 
         void checkAuth();
-    }, [router]);
+
+        return () => {
+            isMounted = false;
+        };
+    }, [router, pathname]);
 
     if (checking) {
         return (

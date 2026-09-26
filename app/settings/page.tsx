@@ -21,6 +21,11 @@ import {
   Check,
   X,
   Fingerprint,
+  ShieldCheck,
+  ShieldAlert,
+  Copy,
+  QrCode,
+  KeyRound,
 } from "lucide-react";
 
 // IMPORTANT:
@@ -58,18 +63,24 @@ function SettingToggle({
   checked,
   onChange,
   label,
+  disabled,
 }: {
   checked: boolean;
   onChange: () => void | Promise<void>;
   label?: string;
+  disabled?: boolean;
 }) {
   return (
     <button
       type="button"
+      disabled={disabled}
       aria-label={label || "Toggle setting"}
       aria-pressed={checked}
       onClick={onChange}
-      className={`relative h-7 w-12 shrink-0 overflow-hidden rounded-full border transition-colors ${checked
+      className={`relative h-7 w-12 shrink-0 overflow-hidden rounded-full border transition-colors ${
+        disabled ? "opacity-50 cursor-not-allowed" : ""
+      } ${
+        checked
         ? "border-emerald-400/40 bg-emerald-500"
         : "border-border bg-muted"
         }`}
@@ -160,6 +171,24 @@ export default function Settings() {
   const [smsAlerts, setSmsAlerts] = useState(false);
 
   const [twoFactor, setTwoFactor] = useState(false);
+  const [mfaLoading, setMfaLoading] = useState(true);
+  const [mfaBusy, setMfaBusy] = useState(false);
+  const [verifiedFactorId, setVerifiedFactorId] = useState<string | null>(null);
+
+  // 2FA Enrollment modal state
+  const [enrollmentModalOpen, setEnrollmentModalOpen] = useState(false);
+  const [enrollmentData, setEnrollmentData] = useState<{
+    id: string;
+    qrCode: string;
+    secret: string;
+  } | null>(null);
+  const [enrollmentCode, setEnrollmentCode] = useState("");
+  const [enrollmentError, setEnrollmentError] = useState("");
+  const [copiedSecret, setCopiedSecret] = useState(false);
+
+  // 2FA Disable modal state
+  const [disableModalOpen, setDisableModalOpen] = useState(false);
+  const [disableError, setDisableError] = useState("");
   const [biometricLock, setBiometricLock] = useState(false);
   const [biometricAvailable, setBiometricAvailable] = useState<
     boolean | null
@@ -302,7 +331,6 @@ export default function Settings() {
           setEmailAlerts(parsed.emailAlerts ?? true);
           setPushAlerts(parsed.pushAlerts ?? false);
           setSmsAlerts(parsed.smsAlerts ?? false);
-          setTwoFactor(parsed.twoFactor ?? false);
 
           const savedBiometricLock =
             parsed.biometricLock ?? false;
@@ -321,6 +349,35 @@ export default function Settings() {
         } catch (parseError) {
           console.error("Parse saved settings error:", parseError);
         }
+      }
+
+      /*
+       * Load real Supabase Auth MFA factor state.
+       * Supabase Auth is the authoritative source for 2FA.
+       */
+      try {
+        setMfaLoading(true);
+        const { data: factorsData, error: factorsError } =
+          await supabase.auth.mfa.listFactors();
+
+        if (factorsError) {
+          console.error("Failed to list MFA factors:", factorsError);
+        } else if (factorsData?.totp) {
+          const verifiedTotp = factorsData.totp.find(
+            (f) => f.status === "verified"
+          );
+          if (verifiedTotp) {
+            setTwoFactor(true);
+            setVerifiedFactorId(verifiedTotp.id);
+          } else {
+            setTwoFactor(false);
+            setVerifiedFactorId(null);
+          }
+        }
+      } catch (mfaLoadError) {
+        console.error("Error loading MFA factors:", mfaLoadError);
+      } finally {
+        setMfaLoading(false);
       }
 
       /*
@@ -657,6 +714,219 @@ export default function Settings() {
       cancelled = true;
     };
   }, []);
+
+  /*
+   * Start 2FA (TOTP) enrollment with Supabase Auth MFA.
+   */
+  async function startMfaEnrollment() {
+    setMfaBusy(true);
+    setEnrollmentError("");
+    setEnrollmentCode("");
+    setCopiedSecret(false);
+
+    try {
+      // 1. Clean up any leftover unverified factors first
+      const { data: existingFactors } = await supabase.auth.mfa.listFactors();
+      if (existingFactors?.all) {
+        for (const factor of existingFactors.all) {
+          if (factor.status === "unverified") {
+            await supabase.auth.mfa.unenroll({ factorId: factor.id });
+          }
+        }
+      }
+
+      // 2. Enroll a new TOTP factor
+      const { data, error } = await supabase.auth.mfa.enroll({
+        factorType: "totp",
+        issuer: "SpendX",
+        friendlyName: "SpendX Authenticator",
+      });
+
+      if (error || !data || !data.totp) {
+        throw new Error(error?.message || "Failed to initialize 2FA enrollment.");
+      }
+
+      setEnrollmentData({
+        id: data.id,
+        qrCode: data.totp.qr_code,
+        secret: data.totp.secret,
+      });
+      setEnrollmentModalOpen(true);
+    } catch (error) {
+      console.error("MFA enrollment error:", error);
+      setErrorMessage(
+        error instanceof Error ? error.message : "Failed to start 2FA setup."
+      );
+    } finally {
+      setMfaBusy(false);
+    }
+  }
+
+  /*
+   * Cancel 2FA enrollment and clean up unverified factor.
+   */
+  async function cancelMfaEnrollment() {
+    if (enrollmentData?.id) {
+      try {
+        await supabase.auth.mfa.unenroll({ factorId: enrollmentData.id });
+      } catch (unenrollErr) {
+        console.warn("Could not unenroll unverified factor on cancel:", unenrollErr);
+      }
+    }
+    setEnrollmentModalOpen(false);
+    setEnrollmentData(null);
+    setEnrollmentCode("");
+    setEnrollmentError("");
+  }
+
+  /*
+   * Verify the 6-digit TOTP code during enrollment.
+   */
+  async function handleVerifyMfaEnrollment(e: FormEvent) {
+    e.preventDefault();
+    setEnrollmentError("");
+
+    const cleanCode = enrollmentCode.trim().replace(/\s+/g, "");
+    if (!cleanCode || cleanCode.length !== 6 || !/^\d{6}$/.test(cleanCode)) {
+      setEnrollmentError("Please enter a valid 6-digit verification code.");
+      return;
+    }
+
+    if (!enrollmentData) {
+      setEnrollmentError("Enrollment session expired. Please try again.");
+      return;
+    }
+
+    setMfaBusy(true);
+
+    try {
+      const { error } = await supabase.auth.mfa.challengeAndVerify({
+        factorId: enrollmentData.id,
+        code: cleanCode,
+      });
+
+      if (error) {
+        const msg = error.message.toLowerCase();
+        if (msg.includes("invalid") || msg.includes("code") || msg.includes("expired")) {
+          setEnrollmentError("Invalid or expired verification code. Please check your app and try again.");
+        } else {
+          setEnrollmentError(error.message);
+        }
+        setMfaBusy(false);
+        return;
+      }
+
+      // Verification successful! Factor is now verified and session is AAL2
+      setTwoFactor(true);
+      setVerifiedFactorId(enrollmentData.id);
+      setEnrollmentModalOpen(false);
+      setEnrollmentData(null);
+      setEnrollmentCode("");
+      setMessage("Two-Factor Authentication (TOTP) has been enabled successfully.");
+
+      // Sync local preferences for consistency
+      try {
+        const saved = localStorage.getItem("spendx-settings");
+        const current = saved ? JSON.parse(saved) : {};
+        localStorage.setItem(
+          "spendx-settings",
+          JSON.stringify({ ...current, twoFactor: true })
+        );
+      } catch {
+        // non-critical
+      }
+    } catch (err) {
+      console.error("MFA verification error:", err);
+      setEnrollmentError("Failed to verify code. Please try again.");
+    } finally {
+      setMfaBusy(false);
+    }
+  }
+
+  /*
+   * Toggle 2FA switch: triggers enrollment if disabled, or confirmation dialog if enabled.
+   */
+  async function handleTwoFactorToggle() {
+    setMessage("");
+    setErrorMessage("");
+
+    if (mfaBusy || mfaLoading) {
+      return;
+    }
+
+    if (twoFactor) {
+      setDisableError("");
+      setDisableModalOpen(true);
+    } else {
+      await startMfaEnrollment();
+    }
+  }
+
+  /*
+   * Confirm disabling 2FA and unenroll the verified factor.
+   */
+  async function handleConfirmDisable2FA() {
+    setMfaBusy(true);
+    setDisableError("");
+
+    try {
+      let factorId = verifiedFactorId;
+      if (!factorId) {
+        const { data: factors } = await supabase.auth.mfa.listFactors();
+        const verified = factors?.totp?.find((f) => f.status === "verified");
+        factorId = verified?.id ?? null;
+      }
+
+      if (!factorId) {
+        setTwoFactor(false);
+        setDisableModalOpen(false);
+        return;
+      }
+
+      const { error } = await supabase.auth.mfa.unenroll({
+        factorId,
+      });
+
+      if (error) {
+        throw error;
+      }
+
+      setTwoFactor(false);
+      setVerifiedFactorId(null);
+      setDisableModalOpen(false);
+      setMessage("Two-Factor Authentication has been disabled.");
+
+      // Sync local preferences for consistency
+      try {
+        const saved = localStorage.getItem("spendx-settings");
+        const current = saved ? JSON.parse(saved) : {};
+        localStorage.setItem(
+          "spendx-settings",
+          JSON.stringify({ ...current, twoFactor: false })
+        );
+      } catch {
+        // non-critical
+      }
+    } catch (err) {
+      console.error("Error disabling 2FA:", err);
+      setDisableError(
+        err instanceof Error ? err.message : "Failed to disable 2FA. Please try again."
+      );
+    } finally {
+      setMfaBusy(false);
+    }
+  }
+
+  /*
+   * Copy manual secret to clipboard.
+   */
+  function copySecretToClipboard() {
+    if (enrollmentData?.secret) {
+      navigator.clipboard.writeText(enrollmentData.secret);
+      setCopiedSecret(true);
+      setTimeout(() => setCopiedSecret(false), 2500);
+    }
+  }
 
   /*
    * Save all preferences.
@@ -1366,28 +1636,50 @@ export default function Settings() {
                                   <div className="space-y-4">
                                     <div className="sx-panel flex items-center justify-between gap-4 rounded-xl p-5">
                                       <div className="min-w-0">
-                                        <h3 className="text-sm font-bold sx-title">
-                                          Two-Factor
-                                          Authentication
-                                        </h3>
-
-                                        <p className="mt-1 text-xs sx-muted">
-                                          This stores the
-                                          preference for now.
-                                          Real 2FA can be
-                                          connected later.
-                                        </p>
+                                        <div className="flex items-center gap-2.5">
+                                          <div className="rounded-xl border border-primary/20 bg-primary/10 p-2 text-primary">
+                                            <ShieldCheck size={18} />
+                                          </div>
+                                          <div>
+                                            <div className="flex items-center gap-2">
+                                              <h3 className="text-sm font-bold sx-title">
+                                                Two-Factor Authentication (TOTP)
+                                              </h3>
+                                              {twoFactor ? (
+                                                <span className="inline-flex items-center gap-1 rounded-full border border-emerald-500/20 bg-emerald-500/10 px-2.5 py-0.5 text-[10px] font-semibold text-emerald-400">
+                                                  Active
+                                                </span>
+                                              ) : (
+                                                <span className="inline-flex items-center gap-1 rounded-full border border-zinc-500/20 bg-zinc-500/10 px-2.5 py-0.5 text-[10px] font-semibold text-zinc-400">
+                                                  Disabled
+                                                </span>
+                                              )}
+                                            </div>
+                                            <p className="mt-1 text-xs sx-muted">
+                                              Protect your account with a time-based one-time password (TOTP) using Google Authenticator, Authy, or 1Password.
+                                            </p>
+                                          </div>
+                                        </div>
                                       </div>
 
-                                      <SettingToggle
-                                        checked={twoFactor}
-                                        onChange={() =>
-                                          setTwoFactor(
-                                            (current) =>
-                                              !current
-                                          )
-                                        }
-                                      />
+                                      <div className="flex shrink-0 items-center gap-3">
+                                        {mfaBusy && (
+                                          <Loader2
+                                            size={16}
+                                            className="animate-spin text-primary"
+                                          />
+                                        )}
+                                        <SettingToggle
+                                          checked={twoFactor}
+                                          disabled={mfaBusy || mfaLoading}
+                                          onChange={handleTwoFactorToggle}
+                                          label={
+                                            twoFactor
+                                              ? "Disable Two-Factor Authentication"
+                                              : "Enable Two-Factor Authentication"
+                                          }
+                                        />
+                                      </div>
                                     </div>
 
                                     <div className="sx-panel rounded-xl p-5">
@@ -1791,6 +2083,205 @@ export default function Settings() {
             </div>
           )}
         </main>
+
+        {/* 2FA ENROLLMENT MODAL */}
+        {enrollmentModalOpen && enrollmentData && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-md animate-in fade-in duration-200">
+            <div className="w-full max-w-md rounded-3xl border border-white/10 bg-[#0d1226] p-6 sm:p-7 shadow-2xl relative">
+              <div className="flex items-center justify-between gap-4 mb-5 pb-4 border-b border-white/10">
+                <div className="flex items-center gap-3">
+                  <div className="rounded-xl border border-emerald-500/20 bg-emerald-500/10 p-2.5 text-emerald-400">
+                    <ShieldCheck size={20} />
+                  </div>
+                  <div>
+                    <h2 className="text-base font-bold text-white font-mono">
+                      Enable Two-Factor Authentication
+                    </h2>
+                    <p className="text-xs text-white/50">
+                      Step-by-step TOTP setup
+                    </p>
+                  </div>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={cancelMfaEnrollment}
+                  className="rounded-xl p-2 text-white/40 transition hover:bg-white/10 hover:text-white"
+                >
+                  <X size={18} />
+                </button>
+              </div>
+
+              {enrollmentError && (
+                <div className="mb-4 rounded-xl border border-red-500/30 bg-red-500/10 p-3 text-xs text-red-200 flex items-start gap-2.5">
+                  <ShieldAlert size={16} className="shrink-0 text-red-400 mt-0.5" />
+                  <span>{enrollmentError}</span>
+                </div>
+              )}
+
+              <form onSubmit={handleVerifyMfaEnrollment} className="space-y-5">
+                {/* Step 1: Scan QR Code */}
+                <div>
+                  <div className="flex items-center gap-2 mb-2 text-xs font-semibold text-emerald-400 uppercase tracking-wider">
+                    <QrCode size={14} />
+                    <span>Step 1: Scan with Authenticator App</span>
+                  </div>
+
+                  <p className="text-xs text-white/60 mb-3">
+                    Open Google Authenticator, Authy, or 1Password and scan this QR code.
+                  </p>
+
+                  <div className="flex justify-center p-3.5 bg-white rounded-2xl mx-auto w-fit shadow-md">
+                    {/* eslint-disable-next-line @next/next/no-img-element */}
+                    <img
+                      src={enrollmentData.qrCode}
+                      alt="Two-Factor QR Code"
+                      className="h-44 w-44 object-contain"
+                    />
+                  </div>
+                </div>
+
+                {/* Manual Key Fallback */}
+                <div className="rounded-xl border border-white/10 bg-white/[0.04] p-3 text-xs">
+                  <div className="flex items-center justify-between mb-1.5">
+                    <span className="text-white/60 flex items-center gap-1.5 font-medium">
+                      <KeyRound size={13} />
+                      Manual setup secret:
+                    </span>
+                    <button
+                      type="button"
+                      onClick={copySecretToClipboard}
+                      className="text-xs text-emerald-400 hover:text-emerald-300 font-semibold flex items-center gap-1 transition"
+                    >
+                      {copiedSecret ? (
+                        <>
+                          <Check size={12} />
+                          <span>Copied!</span>
+                        </>
+                      ) : (
+                        <>
+                          <Copy size={12} />
+                          <span>Copy Key</span>
+                        </>
+                      )}
+                    </button>
+                  </div>
+                  <div className="font-mono text-[11px] text-white/90 break-all select-all tracking-wider bg-black/40 px-2.5 py-1.5 rounded-lg border border-white/5">
+                    {enrollmentData.secret}
+                  </div>
+                </div>
+
+                {/* Step 2: Verification Code */}
+                <div>
+                  <div className="flex items-center gap-2 mb-1.5 text-xs font-semibold text-emerald-400 uppercase tracking-wider">
+                    <Check size={14} />
+                    <span>Step 2: Enter 6-Digit Code</span>
+                  </div>
+
+                  <p className="text-xs text-white/60 mb-2.5">
+                    Enter the code currently displayed in your authenticator app to confirm setup.
+                  </p>
+
+                  <input
+                    type="text"
+                    inputMode="numeric"
+                    autoComplete="one-time-code"
+                    maxLength={6}
+                    placeholder="000000"
+                    value={enrollmentCode}
+                    onChange={(e) => {
+                      setEnrollmentCode(e.target.value.replace(/\D/g, "").slice(0, 6));
+                      setEnrollmentError("");
+                    }}
+                    disabled={mfaBusy}
+                    className="w-full text-center tracking-[0.4em] font-mono text-2xl font-bold py-3 px-4 rounded-xl border border-white/15 bg-white/[0.08] text-white focus:border-emerald-400 focus:bg-white/[0.12] outline-none transition"
+                  />
+                </div>
+
+                {/* Actions */}
+                <div className="flex items-center gap-3 pt-2">
+                  <button
+                    type="button"
+                    onClick={cancelMfaEnrollment}
+                    disabled={mfaBusy}
+                    className="flex-1 rounded-xl border border-white/10 bg-white/[0.04] py-3 text-sm font-semibold text-white/70 hover:bg-white/[0.08] hover:text-white transition disabled:opacity-50"
+                  >
+                    Cancel
+                  </button>
+
+                  <button
+                    type="submit"
+                    disabled={mfaBusy || enrollmentCode.trim().length !== 6}
+                    className="flex-1 flex items-center justify-center gap-2 rounded-xl bg-emerald-500 py-3 text-sm font-semibold text-black transition hover:bg-emerald-400 disabled:cursor-not-allowed disabled:opacity-60 shadow-lg shadow-emerald-500/20"
+                  >
+                    {mfaBusy ? (
+                      <>
+                        <Loader2 size={16} className="animate-spin" />
+                        <span>Verifying...</span>
+                      </>
+                    ) : (
+                      <span>Verify & Activate</span>
+                    )}
+                  </button>
+                </div>
+              </form>
+            </div>
+          </div>
+        )}
+
+        {/* 2FA DISABLE CONFIRMATION MODAL */}
+        {disableModalOpen && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-md animate-in fade-in duration-200">
+            <div className="w-full max-w-md rounded-3xl border border-white/10 bg-[#0d1226] p-6 sm:p-7 shadow-2xl relative">
+              <div className="flex items-start gap-4 mb-4">
+                <div className="rounded-xl border border-red-500/20 bg-red-500/10 p-2.5 text-red-400 shrink-0">
+                  <ShieldAlert size={22} />
+                </div>
+                <div>
+                  <h2 className="text-base font-bold text-white font-mono">
+                    Disable Two-Factor Authentication?
+                  </h2>
+                  <p className="mt-1 text-xs text-white/60 leading-relaxed">
+                    This will remove the extra layer of security from your SpendX account. You will only require your email and password to log in.
+                  </p>
+                </div>
+              </div>
+
+              {disableError && (
+                <div className="mb-4 rounded-xl border border-red-500/30 bg-red-500/10 p-3 text-xs text-red-200">
+                  {disableError}
+                </div>
+              )}
+
+              <div className="flex items-center gap-3 pt-3">
+                <button
+                  type="button"
+                  onClick={() => setDisableModalOpen(false)}
+                  disabled={mfaBusy}
+                  className="flex-1 rounded-xl border border-white/10 bg-white/[0.04] py-3 text-sm font-semibold text-white/70 hover:bg-white/[0.08] hover:text-white transition disabled:opacity-50"
+                >
+                  Keep 2FA Enabled
+                </button>
+
+                <button
+                  type="button"
+                  onClick={handleConfirmDisable2FA}
+                  disabled={mfaBusy}
+                  className="flex-1 flex items-center justify-center gap-2 rounded-xl bg-red-500 py-3 text-sm font-semibold text-white transition hover:bg-red-600 disabled:opacity-60 shadow-lg shadow-red-500/20"
+                >
+                  {mfaBusy ? (
+                    <>
+                      <Loader2 size={16} className="animate-spin" />
+                      <span>Disabling...</span>
+                    </>
+                  ) : (
+                    <span>Disable 2FA</span>
+                  )}
+                </button>
+              </div>
+            </div>
+          </div>
+        )}
 
         <LiquidGlassNavbar />
       </div>

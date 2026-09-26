@@ -24,6 +24,18 @@ export default function LoginPage() {
         } = await supabase.auth.getSession();
 
         if (session) {
+          const { data: aalData } =
+            await supabase.auth.mfa.getAuthenticatorAssuranceLevel();
+
+          if (
+            aalData &&
+            aalData.nextLevel === "aal2" &&
+            aalData.currentLevel !== "aal2"
+          ) {
+            router.replace("/auth/verify-2fa");
+            return;
+          }
+
           router.replace("/dashboard");
           return;
         }
@@ -57,6 +69,20 @@ export default function LoginPage() {
 
       if (error) {
         setErrorMessage(error.message);
+        return;
+      }
+
+      // Check MFA Authenticator Assurance Level
+      const { data: aalData, error: aalError } =
+        await supabase.auth.mfa.getAuthenticatorAssuranceLevel();
+
+      if (
+        !aalError &&
+        aalData &&
+        aalData.nextLevel === "aal2" &&
+        aalData.currentLevel !== "aal2"
+      ) {
+        router.replace("/auth/verify-2fa");
         return;
       }
 
