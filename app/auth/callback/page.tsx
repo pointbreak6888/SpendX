@@ -12,6 +12,30 @@ export default function AuthCallbackPage() {
     useEffect(() => {
         let isMounted = true;
 
+        async function proceedWithRedirect() {
+            try {
+                const { data: aalData } =
+                    await supabase.auth.mfa.getAuthenticatorAssuranceLevel();
+
+                if (
+                    aalData &&
+                    aalData.nextLevel === "aal2" &&
+                    aalData.currentLevel !== "aal2"
+                ) {
+                    if (isMounted) {
+                        router.replace("/auth/verify-2fa");
+                    }
+                    return;
+                }
+            } catch (mfaError) {
+                console.error("OAuth MFA check error:", mfaError);
+            }
+
+            if (isMounted) {
+                router.replace("/dashboard");
+            }
+        }
+
         async function handleAuthCallback() {
             try {
                 // Supabase automatically detects the access_token/refresh_token
@@ -32,19 +56,19 @@ export default function AuthCallbackPage() {
                 }
 
                 if (session) {
-                    router.replace("/dashboard");
+                    await proceedWithRedirect();
                     return;
                 }
 
                 // Wait for Supabase to finish processing the OAuth URL.
                 const {
                     data: { subscription },
-                } = supabase.auth.onAuthStateChange((event, newSession) => {
+                } = supabase.auth.onAuthStateChange(async (event, newSession) => {
                     if (
                         (event === "SIGNED_IN" || event === "INITIAL_SESSION") &&
                         newSession
                     ) {
-                        router.replace("/dashboard");
+                        await proceedWithRedirect();
                     }
                 });
 

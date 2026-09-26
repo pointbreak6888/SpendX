@@ -22,6 +22,19 @@ export default function HomePage() {
         return;
       }
 
+      const { data: mfaData } =
+        await supabase.auth.mfa.getAuthenticatorAssuranceLevel();
+
+      if (
+        mfaData &&
+        mfaData.nextLevel === "aal2" &&
+        mfaData.currentLevel !== "aal2"
+      ) {
+        setStatus("Redirecting to two-factor verification...");
+        router.replace("/auth/verify-2fa");
+        return;
+      }
+
       setStatus("Redirecting to dashboard...");
       router.replace("/dashboard");
     }
