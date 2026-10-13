@@ -35,6 +35,7 @@ import { supabase } from "@/lib/supabase";
 
 import { useTheme } from "@/components/theme-provider";
 import { currencies, type CurrencyCode } from "@/lib/currencies";
+
 import {
   authenticateBiometric,
   clearStoredBiometricCredential,
@@ -42,6 +43,16 @@ import {
   isBiometricSupported,
   registerBiometric,
 } from "@/lib/biometric";
+
+import {
+  sendNotification,
+  requestWebNotificationPermission,
+} from "@/lib/notifications";
+
+import {
+  scheduleDailyExpenseReminder,
+  cancelDailyExpenseReminder,
+} from "@/lib/dailyExpenseReminder";
 
 type ActivePanel =
   | "profile"
@@ -77,12 +88,10 @@ function SettingToggle({
       aria-label={label || "Toggle setting"}
       aria-pressed={checked}
       onClick={onChange}
-      className={`relative h-7 w-12 shrink-0 overflow-hidden rounded-full border transition-colors ${
-        disabled ? "opacity-50 cursor-not-allowed" : ""
-      } ${
-        checked
-        ? "border-emerald-400/40 bg-emerald-500"
-        : "border-border bg-muted"
+      className={`relative h-7 w-12 shrink-0 overflow-hidden rounded-full border transition-colors ${disabled ? "cursor-not-allowed opacity-50" : ""
+        } ${checked
+          ? "border-emerald-400/40 bg-emerald-500"
+          : "border-border bg-muted"
         }`}
     >
       <span
@@ -170,10 +179,24 @@ export default function Settings() {
   const [pushAlerts, setPushAlerts] = useState(false);
   const [smsAlerts, setSmsAlerts] = useState(false);
 
+  /*
+   * Daily expense reminder settings.
+   */
+  const [dailyExpenseReminder, setDailyExpenseReminder] =
+    useState(false);
+
+  const [dailyReminderTime, setDailyReminderTime] =
+    useState("20:00");
+
+  const [notificationBusy, setNotificationBusy] = useState(false);
+  const [dailyReminderBusy, setDailyReminderBusy] = useState(false);
+
   const [twoFactor, setTwoFactor] = useState(false);
   const [mfaLoading, setMfaLoading] = useState(true);
   const [mfaBusy, setMfaBusy] = useState(false);
-  const [verifiedFactorId, setVerifiedFactorId] = useState<string | null>(null);
+  const [verifiedFactorId, setVerifiedFactorId] = useState<string | null>(
+    null
+  );
 
   // 2FA Enrollment modal state
   const [enrollmentModalOpen, setEnrollmentModalOpen] = useState(false);
@@ -189,6 +212,7 @@ export default function Settings() {
   // 2FA Disable modal state
   const [disableModalOpen, setDisableModalOpen] = useState(false);
   const [disableError, setDisableError] = useState("");
+
   const [biometricLock, setBiometricLock] = useState(false);
   const [biometricAvailable, setBiometricAvailable] = useState<
     boolean | null
@@ -239,8 +263,8 @@ export default function Settings() {
       items: [
         {
           id: "alerts" as ActivePanel,
-          name: "Visual Alerts",
-          desc: "Configure push, SMS, and email alerts",
+          name: "System Alerts",
+          desc: "Configure push, daily, SMS, and email alerts",
           icon: Bell,
         },
         {
@@ -271,17 +295,355 @@ export default function Settings() {
     },
   ];
 
+  /*
+   * =========================================================
+   * PUSH ALERTS
+   * =========================================================
+   */
+  async function handlePushAlertsToggle() {
+    if (notificationBusy) {
+      return;
+    }
+
+    setMessage("");
+    setErrorMessage("");
+    setNotificationBusy(true);
+
+    try {
+      /*
+       * Turning notifications OFF.
+       */
+      if (pushAlerts) {
+        setPushAlerts(false);
+
+        /*
+         * Persist immediately so budget and recurring
+         * notification checks stop using Push Alerts.
+         */
+        const savedSettings =
+          localStorage.getItem("spendx-settings");
+
+        let currentSettings: Record<string, unknown> = {};
+
+        if (savedSettings) {
+          try {
+            currentSettings = JSON.parse(savedSettings);
+          } catch {
+            currentSettings = {};
+          }
+        }
+
+        localStorage.setItem(
+          "spendx-settings",
+          JSON.stringify({
+            ...currentSettings,
+            pushAlerts: false,
+          })
+        );
+
+        setMessage("Push Alerts disabled.");
+
+        return;
+      }
+
+      /*
+       * Turning notifications ON.
+       */
+      const permissionGranted =
+        await requestWebNotificationPermission();
+
+      const isNativeEnvironment =
+        typeof window !== "undefined" &&
+        !("Notification" in window);
+
+      let enabled = permissionGranted;
+
+      if (isNativeEnvironment) {
+        enabled = await sendNotification(
+          "SpendX Notifications",
+          "System notifications are enabled.",
+          10001
+        );
+      } else if (permissionGranted) {
+        enabled = await sendNotification(
+          "SpendX Notifications",
+          "System notifications are enabled.",
+          10001
+        );
+      }
+
+      if (!enabled) {
+        setPushAlerts(false);
+
+        setErrorMessage(
+          "Notification permission was not granted. Please allow notifications in your browser settings and try again."
+        );
+
+        return;
+      }
+
+      setPushAlerts(true);
+
+      /*
+       * Persist immediately.
+       */
+      const savedSettings =
+        localStorage.getItem("spendx-settings");
+
+      let currentSettings: Record<string, unknown> = {};
+
+      if (savedSettings) {
+        try {
+          currentSettings = JSON.parse(savedSettings);
+        } catch {
+          currentSettings = {};
+        }
+      }
+
+      localStorage.setItem(
+        "spendx-settings",
+        JSON.stringify({
+          ...currentSettings,
+          pushAlerts: true,
+        })
+      );
+
+      setMessage(
+        "Push Alerts enabled. A system notification has been sent."
+      );
+    } catch (error) {
+      console.error(
+        "Push notification toggle error:",
+        error
+      );
+
+      setPushAlerts(false);
+
+      if (error instanceof Error) {
+        setErrorMessage(error.message);
+      } else {
+        setErrorMessage(
+          "Unable to enable system notifications."
+        );
+      }
+    } finally {
+      setNotificationBusy(false);
+    }
+  }
+
+  /*
+   * =========================================================
+   * DAILY EXPENSE REMINDER
+   * =========================================================
+   */
+
+  async function handleDailyReminderToggle() {
+    if (dailyReminderBusy) {
+      return;
+    }
+
+    setMessage("");
+    setErrorMessage("");
+    setDailyReminderBusy(true);
+
+    try {
+      /*
+       * Disable reminder.
+       */
+      if (dailyExpenseReminder) {
+        await cancelDailyExpenseReminder();
+
+        setDailyExpenseReminder(false);
+
+        /*
+         * Persist immediately.
+         */
+        const savedSettings =
+          localStorage.getItem("spendx-settings");
+
+        let currentSettings: Record<string, unknown> = {};
+
+        if (savedSettings) {
+          try {
+            currentSettings = JSON.parse(savedSettings);
+          } catch {
+            currentSettings = {};
+          }
+        }
+
+        localStorage.setItem(
+          "spendx-settings",
+          JSON.stringify({
+            ...currentSettings,
+            dailyExpenseReminder: false,
+            dailyReminderTime,
+          })
+        );
+
+        setMessage(
+          "Daily expense reminder disabled."
+        );
+
+        return;
+      }
+
+      /*
+       * Enable reminder.
+       */
+      const scheduled =
+        await scheduleDailyExpenseReminder(
+          dailyReminderTime
+        );
+
+      if (!scheduled) {
+        setDailyExpenseReminder(false);
+
+        setErrorMessage(
+          "Unable to enable the daily expense reminder. Please allow notifications and try again."
+        );
+
+        return;
+      }
+
+      setDailyExpenseReminder(true);
+
+      /*
+       * Persist immediately.
+       */
+      const savedSettings =
+        localStorage.getItem("spendx-settings");
+
+      let currentSettings: Record<string, unknown> = {};
+
+      if (savedSettings) {
+        try {
+          currentSettings = JSON.parse(savedSettings);
+        } catch {
+          currentSettings = {};
+        }
+      }
+
+      localStorage.setItem(
+        "spendx-settings",
+        JSON.stringify({
+          ...currentSettings,
+          dailyExpenseReminder: true,
+          dailyReminderTime,
+        })
+      );
+
+      setMessage(
+        `Daily expense reminder enabled for ${dailyReminderTime}.`
+      );
+    } catch (error) {
+      console.error(
+        "Daily expense reminder toggle error:",
+        error
+      );
+
+      setDailyExpenseReminder(false);
+
+      if (error instanceof Error) {
+        setErrorMessage(error.message);
+      } else {
+        setErrorMessage(
+          "Unable to configure the daily expense reminder."
+        );
+      }
+    } finally {
+      setDailyReminderBusy(false);
+    }
+  }
+
+  /*
+   * Change daily reminder time.
+   */
+  async function handleDailyReminderTimeChange(
+    newTime: string
+  ) {
+    setDailyReminderTime(newTime);
+    setMessage("");
+    setErrorMessage("");
+
+    if (!newTime) {
+      return;
+    }
+
+    /*
+     * If the reminder is currently enabled,
+     * reschedule it immediately.
+     */
+    if (dailyExpenseReminder) {
+      setDailyReminderBusy(true);
+
+      try {
+        const scheduled =
+          await scheduleDailyExpenseReminder(
+            newTime
+          );
+
+        if (!scheduled) {
+          setErrorMessage(
+            "Unable to update the daily reminder time."
+          );
+
+          return;
+        }
+
+        /*
+         * Persist the new time.
+         */
+        const savedSettings =
+          localStorage.getItem("spendx-settings");
+
+        let currentSettings: Record<string, unknown> = {};
+
+        if (savedSettings) {
+          try {
+            currentSettings = JSON.parse(savedSettings);
+          } catch {
+            currentSettings = {};
+          }
+        }
+
+        localStorage.setItem(
+          "spendx-settings",
+          JSON.stringify({
+            ...currentSettings,
+            dailyExpenseReminder: true,
+            dailyReminderTime: newTime,
+          })
+        );
+
+        setMessage(
+          `Daily expense reminder updated to ${newTime}.`
+        );
+      } catch (error) {
+        console.error(
+          "Daily reminder time update error:",
+          error
+        );
+
+        setErrorMessage(
+          "Unable to update the daily reminder time."
+        );
+      } finally {
+        setDailyReminderBusy(false);
+      }
+    }
+  }
+
+  /*
+   * =========================================================
+   * LOAD USER / SETTINGS
+   * =========================================================
+   */
   async function loadUser() {
     try {
       setLoading(true);
       setErrorMessage("");
       setMessage("");
 
-      /*
-       * Use the existing SpendX Supabase client.
-       * This keeps the same authentication/session flow
-       * that AuthGuard and the rest of the application use.
-       */
       const {
         data: { user },
         error,
@@ -322,66 +684,102 @@ export default function Settings() {
       /*
        * Load locally stored preferences.
        */
-      const savedSettings = localStorage.getItem("spendx-settings");
+      const savedSettings =
+        localStorage.getItem("spendx-settings");
 
       if (savedSettings) {
         try {
           const parsed = JSON.parse(savedSettings);
 
-          setEmailAlerts(parsed.emailAlerts ?? true);
-          setPushAlerts(parsed.pushAlerts ?? false);
-          setSmsAlerts(parsed.smsAlerts ?? false);
+          setEmailAlerts(
+            parsed.emailAlerts ?? true
+          );
+
+          setPushAlerts(
+            parsed.pushAlerts ?? false
+          );
+
+          setSmsAlerts(
+            parsed.smsAlerts ?? false
+          );
+
+          setDailyExpenseReminder(
+            parsed.dailyExpenseReminder ?? false
+          );
+
+          setDailyReminderTime(
+            parsed.dailyReminderTime ?? "20:00"
+          );
 
           const savedBiometricLock =
             parsed.biometricLock ?? false;
 
-          /*
-           * A saved preference is only considered active when this
-           * browser still has the registered WebAuthn credential ID.
-           */
           setBiometricLock(
             savedBiometricLock &&
-            Boolean(getStoredBiometricCredentialId())
+            Boolean(
+              getStoredBiometricCredentialId()
+            )
           );
 
-          setLanguage(parsed.language ?? "English");
-          setPaymentConnected(parsed.paymentConnected ?? false);
+          setLanguage(
+            parsed.language ?? "English"
+          );
+
+          setPaymentConnected(
+            parsed.paymentConnected ?? false
+          );
         } catch (parseError) {
-          console.error("Parse saved settings error:", parseError);
+          console.error(
+            "Parse saved settings error:",
+            parseError
+          );
         }
       }
 
       /*
        * Load real Supabase Auth MFA factor state.
-       * Supabase Auth is the authoritative source for 2FA.
        */
       try {
         setMfaLoading(true);
-        const { data: factorsData, error: factorsError } =
+
+        const {
+          data: factorsData,
+          error: factorsError,
+        } =
           await supabase.auth.mfa.listFactors();
 
         if (factorsError) {
-          console.error("Failed to list MFA factors:", factorsError);
-        } else if (factorsData?.totp) {
-          const verifiedTotp = factorsData.totp.find(
-            (f) => f.status === "verified"
+          console.error(
+            "Failed to list MFA factors:",
+            factorsError
           );
+        } else if (factorsData?.totp) {
+          const verifiedTotp =
+            factorsData.totp.find(
+              (f) => f.status === "verified"
+            );
+
           if (verifiedTotp) {
             setTwoFactor(true);
-            setVerifiedFactorId(verifiedTotp.id);
+            setVerifiedFactorId(
+              verifiedTotp.id
+            );
           } else {
             setTwoFactor(false);
             setVerifiedFactorId(null);
           }
         }
       } catch (mfaLoadError) {
-        console.error("Error loading MFA factors:", mfaLoadError);
+        console.error(
+          "Error loading MFA factors:",
+          mfaLoadError
+        );
       } finally {
         setMfaLoading(false);
       }
 
       /*
-       * Load the user's currency from profiles.
+       * Load currency.
        */
       const {
         data: profileSettings,
@@ -393,16 +791,19 @@ export default function Settings() {
         .maybeSingle();
 
       if (profileError) {
-        console.error("Load currency error:", profileError);
-      } else if (profileSettings?.currency) {
-        const savedCurrency = profileSettings.currency as CurrencyCode;
-
-        /*
-         * Only accept currencies supported by the application.
-         */
-        const isValidCurrency = currencies.some(
-          (item) => item.code === savedCurrency
+        console.error(
+          "Load currency error:",
+          profileError
         );
+      } else if (profileSettings?.currency) {
+        const savedCurrency =
+          profileSettings.currency as CurrencyCode;
+
+        const isValidCurrency =
+          currencies.some(
+            (item) =>
+              item.code === savedCurrency
+          );
 
         if (isValidCurrency) {
           setCurrency(savedCurrency);
@@ -414,32 +815,40 @@ export default function Settings() {
       }
 
       /*
-       * Load the user's monthly spending limit.
-       *
-       * The limit is stored separately from the profile
-       * in monthly_spending_limits.
+       * Load monthly spending limit.
        */
       const {
         data: spendingLimitSettings,
         error: spendingLimitError,
-      } = await supabase
-        .from("monthly_spending_limits")
-        .select("monthly_limit")
-        .eq("user_id", user.id)
-        .maybeSingle();
+      } =
+        await supabase
+          .from("monthly_spending_limits")
+          .select("monthly_limit")
+          .eq("user_id", user.id)
+          .maybeSingle();
 
       if (spendingLimitError) {
         console.error(
           "Load monthly spending limit error:",
           spendingLimitError
         );
-      } else if (spendingLimitSettings?.monthly_limit != null) {
-        setMonthlyLimit(String(spendingLimitSettings.monthly_limit));
+      } else if (
+        spendingLimitSettings?.monthly_limit !=
+        null
+      ) {
+        setMonthlyLimit(
+          String(
+            spendingLimitSettings.monthly_limit
+          )
+        );
       } else {
         setMonthlyLimit("");
       }
     } catch (error) {
-      console.error("Load settings error:", error);
+      console.error(
+        "Load settings error:",
+        error
+      );
 
       if (error instanceof Error) {
         setErrorMessage(error.message);
@@ -453,18 +862,27 @@ export default function Settings() {
     }
   }
 
+  /*
+   * =========================================================
+   * PROFILE
+   * =========================================================
+   */
   async function handleSaveProfile(
     event: FormEvent<HTMLFormElement>
   ) {
     event.preventDefault();
 
     if (!profile) {
-      setErrorMessage("Profile not loaded yet.");
+      setErrorMessage(
+        "Profile not loaded yet."
+      );
       return;
     }
 
     if (!displayName.trim()) {
-      setErrorMessage("Display name cannot be empty.");
+      setErrorMessage(
+        "Display name cannot be empty."
+      );
       return;
     }
 
@@ -473,17 +891,21 @@ export default function Settings() {
       setMessage("");
       setErrorMessage("");
 
-      const cleanName = displayName.trim();
+      const cleanName =
+        displayName.trim();
 
-      const { error } = await supabase.auth.updateUser({
-        data: {
-          full_name: cleanName,
-          name: cleanName,
-        },
-      });
+      const { error } =
+        await supabase.auth.updateUser({
+          data: {
+            full_name: cleanName,
+            name: cleanName,
+          },
+        });
 
       if (error) {
-        throw new Error(error.message);
+        throw new Error(
+          error.message
+        );
       }
 
       setProfile({
@@ -491,9 +913,14 @@ export default function Settings() {
         full_name: cleanName,
       });
 
-      setMessage("Profile updated successfully.");
+      setMessage(
+        "Profile updated successfully."
+      );
     } catch (error) {
-      console.error("Save profile error:", error);
+      console.error(
+        "Save profile error:",
+        error
+      );
 
       if (error instanceof Error) {
         setErrorMessage(error.message);
@@ -507,21 +934,36 @@ export default function Settings() {
     }
   }
 
-  async function persistBiometricPreference(enabled: boolean) {
-    const savedSettings = localStorage.getItem("spendx-settings");
+  /*
+   * =========================================================
+   * BIOMETRIC
+   * =========================================================
+   */
+  async function persistBiometricPreference(
+    enabled: boolean
+  ) {
+    const savedSettings =
+      localStorage.getItem(
+        "spendx-settings"
+      );
 
-    let existingSettings: Record<string, unknown> = {};
+    let existingSettings: Record<
+      string,
+      unknown
+    > = {};
 
     if (savedSettings) {
       try {
-        const parsed = JSON.parse(savedSettings);
+        const parsed =
+          JSON.parse(savedSettings);
 
         if (
           parsed &&
           typeof parsed === "object" &&
           !Array.isArray(parsed)
         ) {
-          existingSettings = parsed;
+          existingSettings =
+            parsed;
         }
       } catch {
         existingSettings = {};
@@ -535,6 +977,8 @@ export default function Settings() {
         emailAlerts,
         pushAlerts,
         smsAlerts,
+        dailyExpenseReminder,
+        dailyReminderTime,
         twoFactor,
         biometricLock: enabled,
         language,
@@ -551,18 +995,19 @@ export default function Settings() {
       return;
     }
 
-    /*
-     * Disabling the lock does not remove the device's WebAuthn
-     * credential. It only disables SpendX's use of it. The private
-     * key remains protected by the platform authenticator.
-     */
     if (biometricLock) {
       clearStoredBiometricCredential();
+
       setBiometricLock(false);
 
-      await persistBiometricPreference(false);
+      await persistBiometricPreference(
+        false
+      );
 
-      setMessage("Biometric Lock disabled.");
+      setMessage(
+        "Biometric Lock disabled."
+      );
+
       return;
     }
 
@@ -576,8 +1021,12 @@ export default function Settings() {
     try {
       setBiometricBusy(true);
 
-      const supported = await isBiometricSupported();
-      setBiometricAvailable(supported);
+      const supported =
+        await isBiometricSupported();
+
+      setBiometricAvailable(
+        supported
+      );
 
       if (!supported) {
         throw new Error(
@@ -591,30 +1040,34 @@ export default function Settings() {
         profile.full_name
       );
 
-      /*
-       * Registration requires user verification. We also perform a
-       * real authentication immediately so the feature is verified
-       * before the preference is switched on.
-       */
-      const verified = await authenticateBiometric();
+      const verified =
+        await authenticateBiometric();
 
       if (!verified) {
         clearStoredBiometricCredential();
+
         throw new Error(
           "Biometric verification could not be completed. Biometric Lock remains disabled."
         );
       }
 
       setBiometricLock(true);
-      await persistBiometricPreference(true);
+
+      await persistBiometricPreference(
+        true
+      );
 
       setMessage(
         "Biometric Lock enabled successfully. Your device will verify you with its available biometric or device authenticator."
       );
     } catch (error) {
-      console.error("Enable biometric lock error:", error);
+      console.error(
+        "Enable biometric lock error:",
+        error
+      );
 
       clearStoredBiometricCredential();
+
       setBiometricLock(false);
 
       if (
@@ -625,7 +1078,9 @@ export default function Settings() {
           "Biometric verification was cancelled or not completed. Biometric Lock remains disabled."
         );
       } else if (error instanceof Error) {
-        setErrorMessage(error.message);
+        setErrorMessage(
+          error.message
+        );
       } else {
         setErrorMessage(
           "Unable to enable Biometric Lock on this device."
@@ -650,7 +1105,8 @@ export default function Settings() {
     try {
       setBiometricBusy(true);
 
-      const verified = await authenticateBiometric();
+      const verified =
+        await authenticateBiometric();
 
       if (!verified) {
         throw new Error(
@@ -658,9 +1114,14 @@ export default function Settings() {
         );
       }
 
-      setMessage("Biometric verification successful.");
+      setMessage(
+        "Biometric verification successful."
+      );
     } catch (error) {
-      console.error("Biometric verification error:", error);
+      console.error(
+        "Biometric verification error:",
+        error
+      );
 
       if (
         error instanceof DOMException &&
@@ -670,7 +1131,9 @@ export default function Settings() {
           "Biometric verification was cancelled or failed."
         );
       } else if (error instanceof Error) {
-        setErrorMessage(error.message);
+        setErrorMessage(
+          error.message
+        );
       } else {
         setErrorMessage(
           "Biometric verification failed."
@@ -681,20 +1144,18 @@ export default function Settings() {
     }
   }
 
-  /*
-   * Check biometric capability when the settings page is opened.
-   * WebAuthn requires a secure context (HTTPS or localhost).
-   */
   useEffect(() => {
     let cancelled = false;
 
     async function checkBiometricSupport() {
       try {
-        const supported: boolean =
+        const supported =
           await isBiometricSupported();
 
         if (!cancelled) {
-          setBiometricAvailable(supported);
+          setBiometricAvailable(
+            supported
+          );
         }
       } catch (error) {
         console.error(
@@ -703,7 +1164,9 @@ export default function Settings() {
         );
 
         if (!cancelled) {
-          setBiometricAvailable(false);
+          setBiometricAvailable(
+            false
+          );
         }
       }
     }
@@ -716,7 +1179,9 @@ export default function Settings() {
   }, []);
 
   /*
-   * Start 2FA (TOTP) enrollment with Supabase Auth MFA.
+   * =========================================================
+   * 2FA
+   * =========================================================
    */
   async function startMfaEnrollment() {
     setMfaBusy(true);
@@ -725,132 +1190,223 @@ export default function Settings() {
     setCopiedSecret(false);
 
     try {
-      // 1. Clean up any leftover unverified factors first
-      const { data: existingFactors } = await supabase.auth.mfa.listFactors();
+      const {
+        data: existingFactors,
+      } =
+        await supabase.auth.mfa.listFactors();
+
       if (existingFactors?.all) {
         for (const factor of existingFactors.all) {
-          if (factor.status === "unverified") {
-            await supabase.auth.mfa.unenroll({ factorId: factor.id });
+          if (
+            factor.status ===
+            "unverified"
+          ) {
+            await supabase.auth.mfa.unenroll(
+              {
+                factorId: factor.id,
+              }
+            );
           }
         }
       }
 
-      // 2. Enroll a new TOTP factor
-      const { data, error } = await supabase.auth.mfa.enroll({
-        factorType: "totp",
-        issuer: "SpendX",
-        friendlyName: "SpendX Authenticator",
-      });
+      const { data, error } =
+        await supabase.auth.mfa.enroll({
+          factorType: "totp",
+          issuer: "SpendX",
+          friendlyName:
+            "SpendX Authenticator",
+        });
 
-      if (error || !data || !data.totp) {
-        throw new Error(error?.message || "Failed to initialize 2FA enrollment.");
+      if (
+        error ||
+        !data ||
+        !data.totp
+      ) {
+        throw new Error(
+          error?.message ||
+          "Failed to initialize 2FA enrollment."
+        );
       }
 
       setEnrollmentData({
         id: data.id,
-        qrCode: data.totp.qr_code,
-        secret: data.totp.secret,
+        qrCode:
+          data.totp.qr_code,
+        secret:
+          data.totp.secret,
       });
-      setEnrollmentModalOpen(true);
+
+      setEnrollmentModalOpen(
+        true
+      );
     } catch (error) {
-      console.error("MFA enrollment error:", error);
+      console.error(
+        "MFA enrollment error:",
+        error
+      );
+
       setErrorMessage(
-        error instanceof Error ? error.message : "Failed to start 2FA setup."
+        error instanceof Error
+          ? error.message
+          : "Failed to start 2FA setup."
       );
     } finally {
       setMfaBusy(false);
     }
   }
 
-  /*
-   * Cancel 2FA enrollment and clean up unverified factor.
-   */
   async function cancelMfaEnrollment() {
     if (enrollmentData?.id) {
       try {
-        await supabase.auth.mfa.unenroll({ factorId: enrollmentData.id });
+        await supabase.auth.mfa.unenroll(
+          {
+            factorId:
+              enrollmentData.id,
+          }
+        );
       } catch (unenrollErr) {
-        console.warn("Could not unenroll unverified factor on cancel:", unenrollErr);
+        console.warn(
+          "Could not unenroll unverified factor on cancel:",
+          unenrollErr
+        );
       }
     }
-    setEnrollmentModalOpen(false);
+
+    setEnrollmentModalOpen(
+      false
+    );
+
     setEnrollmentData(null);
     setEnrollmentCode("");
     setEnrollmentError("");
   }
 
-  /*
-   * Verify the 6-digit TOTP code during enrollment.
-   */
-  async function handleVerifyMfaEnrollment(e: FormEvent) {
+  async function handleVerifyMfaEnrollment(
+    e: FormEvent
+  ) {
     e.preventDefault();
+
     setEnrollmentError("");
 
-    const cleanCode = enrollmentCode.trim().replace(/\s+/g, "");
-    if (!cleanCode || cleanCode.length !== 6 || !/^\d{6}$/.test(cleanCode)) {
-      setEnrollmentError("Please enter a valid 6-digit verification code.");
+    const cleanCode =
+      enrollmentCode
+        .trim()
+        .replace(/\s+/g, "");
+
+    if (
+      !cleanCode ||
+      cleanCode.length !== 6 ||
+      !/^\d{6}$/.test(cleanCode)
+    ) {
+      setEnrollmentError(
+        "Please enter a valid 6-digit verification code."
+      );
+
       return;
     }
 
     if (!enrollmentData) {
-      setEnrollmentError("Enrollment session expired. Please try again.");
+      setEnrollmentError(
+        "Enrollment session expired. Please try again."
+      );
+
       return;
     }
 
     setMfaBusy(true);
 
     try {
-      const { error } = await supabase.auth.mfa.challengeAndVerify({
-        factorId: enrollmentData.id,
-        code: cleanCode,
-      });
+      const { error } =
+        await supabase.auth.mfa.challengeAndVerify(
+          {
+            factorId:
+              enrollmentData.id,
+            code: cleanCode,
+          }
+        );
 
       if (error) {
-        const msg = error.message.toLowerCase();
-        if (msg.includes("invalid") || msg.includes("code") || msg.includes("expired")) {
-          setEnrollmentError("Invalid or expired verification code. Please check your app and try again.");
+        const msg =
+          error.message.toLowerCase();
+
+        if (
+          msg.includes("invalid") ||
+          msg.includes("code") ||
+          msg.includes("expired")
+        ) {
+          setEnrollmentError(
+            "Invalid or expired verification code. Please check your app and try again."
+          );
         } else {
-          setEnrollmentError(error.message);
+          setEnrollmentError(
+            error.message
+          );
         }
+
         setMfaBusy(false);
         return;
       }
 
-      // Verification successful! Factor is now verified and session is AAL2
       setTwoFactor(true);
-      setVerifiedFactorId(enrollmentData.id);
-      setEnrollmentModalOpen(false);
+
+      setVerifiedFactorId(
+        enrollmentData.id
+      );
+
+      setEnrollmentModalOpen(
+        false
+      );
+
       setEnrollmentData(null);
       setEnrollmentCode("");
-      setMessage("Two-Factor Authentication (TOTP) has been enabled successfully.");
 
-      // Sync local preferences for consistency
+      setMessage(
+        "Two-Factor Authentication (TOTP) has been enabled successfully."
+      );
+
       try {
-        const saved = localStorage.getItem("spendx-settings");
-        const current = saved ? JSON.parse(saved) : {};
+        const saved =
+          localStorage.getItem(
+            "spendx-settings"
+          );
+
+        const current = saved
+          ? JSON.parse(saved)
+          : {};
+
         localStorage.setItem(
           "spendx-settings",
-          JSON.stringify({ ...current, twoFactor: true })
+          JSON.stringify({
+            ...current,
+            twoFactor: true,
+          })
         );
       } catch {
-        // non-critical
+        // Non-critical.
       }
     } catch (err) {
-      console.error("MFA verification error:", err);
-      setEnrollmentError("Failed to verify code. Please try again.");
+      console.error(
+        "MFA verification error:",
+        err
+      );
+
+      setEnrollmentError(
+        "Failed to verify code. Please try again."
+      );
     } finally {
       setMfaBusy(false);
     }
   }
 
-  /*
-   * Toggle 2FA switch: triggers enrollment if disabled, or confirmation dialog if enabled.
-   */
   async function handleTwoFactorToggle() {
     setMessage("");
     setErrorMessage("");
 
-    if (mfaBusy || mfaLoading) {
+    if (
+      mfaBusy ||
+      mfaLoading
+    ) {
       return;
     }
 
@@ -862,94 +1418,137 @@ export default function Settings() {
     }
   }
 
-  /*
-   * Confirm disabling 2FA and unenroll the verified factor.
-   */
   async function handleConfirmDisable2FA() {
     setMfaBusy(true);
     setDisableError("");
 
     try {
-      let factorId = verifiedFactorId;
+      let factorId =
+        verifiedFactorId;
+
       if (!factorId) {
-        const { data: factors } = await supabase.auth.mfa.listFactors();
-        const verified = factors?.totp?.find((f) => f.status === "verified");
-        factorId = verified?.id ?? null;
+        const {
+          data: factors,
+        } =
+          await supabase.auth.mfa.listFactors();
+
+        const verified =
+          factors?.totp?.find(
+            (f) =>
+              f.status ===
+              "verified"
+          );
+
+        factorId =
+          verified?.id ??
+          null;
       }
 
       if (!factorId) {
         setTwoFactor(false);
-        setDisableModalOpen(false);
+        setDisableModalOpen(
+          false
+        );
         return;
       }
 
-      const { error } = await supabase.auth.mfa.unenroll({
-        factorId,
-      });
+      const { error } =
+        await supabase.auth.mfa.unenroll(
+          {
+            factorId,
+          }
+        );
 
       if (error) {
         throw error;
       }
 
       setTwoFactor(false);
-      setVerifiedFactorId(null);
-      setDisableModalOpen(false);
-      setMessage("Two-Factor Authentication has been disabled.");
+      setVerifiedFactorId(
+        null
+      );
 
-      // Sync local preferences for consistency
+      setDisableModalOpen(
+        false
+      );
+
+      setMessage(
+        "Two-Factor Authentication has been disabled."
+      );
+
       try {
-        const saved = localStorage.getItem("spendx-settings");
-        const current = saved ? JSON.parse(saved) : {};
+        const saved =
+          localStorage.getItem(
+            "spendx-settings"
+          );
+
+        const current = saved
+          ? JSON.parse(saved)
+          : {};
+
         localStorage.setItem(
           "spendx-settings",
-          JSON.stringify({ ...current, twoFactor: false })
+          JSON.stringify({
+            ...current,
+            twoFactor: false,
+          })
         );
       } catch {
-        // non-critical
+        // Non-critical.
       }
     } catch (err) {
-      console.error("Error disabling 2FA:", err);
+      console.error(
+        "Error disabling 2FA:",
+        err
+      );
+
       setDisableError(
-        err instanceof Error ? err.message : "Failed to disable 2FA. Please try again."
+        err instanceof Error
+          ? err.message
+          : "Failed to disable 2FA. Please try again."
       );
     } finally {
       setMfaBusy(false);
     }
   }
 
-  /*
-   * Copy manual secret to clipboard.
-   */
   function copySecretToClipboard() {
     if (enrollmentData?.secret) {
-      navigator.clipboard.writeText(enrollmentData.secret);
+      navigator.clipboard.writeText(
+        enrollmentData.secret
+      );
+
       setCopiedSecret(true);
-      setTimeout(() => setCopiedSecret(false), 2500);
+
+      setTimeout(
+        () =>
+          setCopiedSecret(
+            false
+          ),
+        2500
+      );
     }
   }
 
   /*
-   * Save all preferences.
-   *
-   * IMPORTANT:
-   * - Currency is saved in profiles.currency.
-   * - Transaction amounts are never converted.
-   * - upsert handles both existing and missing profile rows.
+   * =========================================================
+   * SAVE PREFERENCES
+   * =========================================================
    */
   async function savePreferences() {
     try {
-      setSavingPreferences(true);
+      setSavingPreferences(
+        true
+      );
+
       setMessage("");
       setErrorMessage("");
 
-      /*
-       * Get the current authenticated user using the existing
-       * SpendX Supabase client.
-       */
       const {
         data: { user },
         error: userError,
-      } = await supabase.auth.getUser();
+      } =
+        await supabase.auth.getUser();
 
       if (userError) {
         console.error(
@@ -957,16 +1556,16 @@ export default function Settings() {
           userError
         );
 
-        throw new Error(userError.message);
+        throw new Error(
+          userError.message
+        );
       }
 
       if (!user) {
-        /*
-         * Try to get the session as an additional check.
-         */
         const {
           data: { session },
-        } = await supabase.auth.getSession();
+        } =
+          await supabase.auth.getSession();
 
         if (!session?.user) {
           throw new Error(
@@ -975,10 +1574,8 @@ export default function Settings() {
         }
       }
 
-      /*
-       * Use the authenticated user's ID.
-       */
-      const authenticatedUser = user;
+      const authenticatedUser =
+        user;
 
       if (!authenticatedUser) {
         throw new Error(
@@ -987,18 +1584,16 @@ export default function Settings() {
       }
 
       /*
-       * Save the selected currency.
-       *
-       * upsert:
-       * - updates the row if it exists
-       * - creates the row if it doesn't exist
+       * Save currency.
        */
-      const { error: currencyError } = await supabase
+      const {
+        error: currencyError,
+      } = await supabase
         .from("profiles")
         .upsert(
           {
             id: authenticatedUser.id,
-            currency: currency,
+            currency,
           },
           {
             onConflict: "id",
@@ -1011,11 +1606,13 @@ export default function Settings() {
           currencyError
         );
 
-        throw new Error(currencyError.message);
+        throw new Error(
+          currencyError.message
+        );
       }
 
       /*
-       * Save the other UI preferences locally.
+       * Save all local preferences.
        */
       localStorage.setItem(
         "spendx-settings",
@@ -1023,6 +1620,8 @@ export default function Settings() {
           emailAlerts,
           pushAlerts,
           smsAlerts,
+          dailyExpenseReminder,
+          dailyReminderTime,
           twoFactor,
           biometricLock,
           language,
@@ -1030,44 +1629,74 @@ export default function Settings() {
         })
       );
 
+      /*
+       * If daily reminder is enabled, make sure
+       * the currently selected time is scheduled.
+       */
+      if (dailyExpenseReminder) {
+        const scheduled =
+          await scheduleDailyExpenseReminder(
+            dailyReminderTime
+          );
+
+        if (!scheduled) {
+          throw new Error(
+            "Daily expense reminder could not be scheduled. Please check notification permissions."
+          );
+        }
+      } else {
+        await cancelDailyExpenseReminder();
+      }
+
       setMessage(
-        `Localization settings saved successfully. Currency: ${currency}`
+        `Settings saved successfully. Currency: ${currency}`
       );
     } catch (error) {
-      console.error("Save preferences error:", error);
+      console.error(
+        "Save preferences error:",
+        error
+      );
 
       if (error instanceof Error) {
-        setErrorMessage(error.message);
+        setErrorMessage(
+          error.message
+        );
       } else {
         setErrorMessage(
           "Something went wrong while saving preferences."
         );
       }
     } finally {
-      setSavingPreferences(false);
+      setSavingPreferences(
+        false
+      );
     }
   }
 
   /*
-   * Save the monthly spending limit.
-   *
-   * The limit is stored in monthly_spending_limits and
-   * automatically remains active for future months until
-   * the user changes it.
+   * =========================================================
+   * MONTHLY SPENDING LIMIT
+   * =========================================================
    */
   async function saveMonthlySpendingLimit() {
     try {
-      setSavingMonthlyLimit(true);
+      setSavingMonthlyLimit(
+        true
+      );
+
       setMessage("");
       setErrorMessage("");
 
       const {
         data: { user },
         error: userError,
-      } = await supabase.auth.getUser();
+      } =
+        await supabase.auth.getUser();
 
       if (userError) {
-        throw new Error(userError.message);
+        throw new Error(
+          userError.message
+        );
       }
 
       if (!user) {
@@ -1082,32 +1711,48 @@ export default function Settings() {
         );
       }
 
-      const parsedLimit = Number(monthlyLimit);
+      const parsedLimit =
+        Number(monthlyLimit);
 
-      if (!Number.isFinite(parsedLimit) || parsedLimit <= 0) {
+      if (
+        !Number.isFinite(
+          parsedLimit
+        ) ||
+        parsedLimit <= 0
+      ) {
         throw new Error(
           "Monthly spending limit must be greater than zero."
         );
       }
 
-      const { error } = await supabase
-        .from("monthly_spending_limits")
-        .upsert(
-          {
-            user_id: user.id,
-            monthly_limit: parsedLimit,
-            updated_at: new Date().toISOString(),
-          },
-          {
-            onConflict: "user_id",
-          }
-        );
+      const { error } =
+        await supabase
+          .from(
+            "monthly_spending_limits"
+          )
+          .upsert(
+            {
+              user_id: user.id,
+              monthly_limit:
+                parsedLimit,
+              updated_at:
+                new Date().toISOString(),
+            },
+            {
+              onConflict:
+                "user_id",
+            }
+          );
 
       if (error) {
-        throw new Error(error.message);
+        throw new Error(
+          error.message
+        );
       }
 
-      setMonthlyLimit(parsedLimit.toString());
+      setMonthlyLimit(
+        parsedLimit.toString()
+      );
 
       setMessage(
         "Monthly spending limit saved successfully."
@@ -1119,35 +1764,52 @@ export default function Settings() {
       );
 
       if (error instanceof Error) {
-        setErrorMessage(error.message);
+        setErrorMessage(
+          error.message
+        );
       } else {
         setErrorMessage(
           "Something went wrong while saving your spending limit."
         );
       }
     } finally {
-      setSavingMonthlyLimit(false);
+      setSavingMonthlyLimit(
+        false
+      );
     }
   }
 
+  /*
+   * =========================================================
+   * SIGN OUT
+   * =========================================================
+   */
   async function handleSignOut() {
     try {
       setSigningOut(true);
       setErrorMessage("");
       setMessage("");
 
-      const { error } = await supabase.auth.signOut();
+      const { error } =
+        await supabase.auth.signOut();
 
       if (error) {
-        throw new Error(error.message);
+        throw new Error(
+          error.message
+        );
       }
 
       router.push("/login");
     } catch (error) {
-      console.error("Sign out error:", error);
+      console.error(
+        "Sign out error:",
+        error
+      );
 
       if (error instanceof Error) {
-        setErrorMessage(error.message);
+        setErrorMessage(
+          error.message
+        );
       } else {
         setErrorMessage(
           "Something went wrong while signing out."
@@ -1158,16 +1820,30 @@ export default function Settings() {
     }
   }
 
+  /*
+   * =========================================================
+   * INITIAL LOAD
+   * =========================================================
+   */
   useEffect(() => {
-    const timer = window.setTimeout(() => {
-      void loadUser();
-    }, 0);
+    const timer =
+      window.setTimeout(() => {
+        void loadUser();
+      }, 0);
 
-    return () => window.clearTimeout(timer);
+    return () =>
+      window.clearTimeout(
+        timer
+      );
 
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  /*
+   * =========================================================
+   * PROFILE INITIALS
+   * =========================================================
+   */
   const initials = useMemo(() => {
     const name =
       profile?.full_name ||
@@ -1178,7 +1854,9 @@ export default function Settings() {
       .split(" ")
       .filter(Boolean)
       .slice(0, 2)
-      .map((part) => part[0]?.toUpperCase())
+      .map((part) =>
+        part[0]?.toUpperCase()
+      )
       .join("");
   }, [profile]);
 
@@ -1187,25 +1865,30 @@ export default function Settings() {
       <div className="sx-screen">
         <TopHeader />
 
-        <main className="mx-auto max-w-6xl px-6 pt-36 pb-32">
+        <main className="mx-auto max-w-6xl px-6 pb-32 pt-36">
           <div className="mb-10">
             <h1 className="font-mono text-4xl font-bold tracking-tight sx-title">
               Settings
             </h1>
 
             <p className="mt-2 sx-muted">
-              Configure SpendX preferences, security,
-              profile, and account controls.
+              Configure SpendX preferences,
+              security, profile, and account
+              controls.
             </p>
           </div>
 
           {errorMessage && (
             <div className="mb-6 flex items-center justify-between gap-4 rounded-2xl border border-red-500/20 bg-red-500/10 px-5 py-4 text-sm text-red-300">
-              <span>{errorMessage}</span>
+              <span>
+                {errorMessage}
+              </span>
 
               <button
                 type="button"
-                onClick={() => setErrorMessage("")}
+                onClick={() =>
+                  setErrorMessage("")
+                }
                 className="rounded-full p-1 hover:bg-red-500/10"
               >
                 <X size={16} />
@@ -1215,11 +1898,15 @@ export default function Settings() {
 
           {message && (
             <div className="mb-6 flex items-center justify-between gap-4 rounded-2xl border border-emerald-500/20 bg-emerald-500/10 px-5 py-4 text-sm text-emerald-300">
-              <span>{message}</span>
+              <span>
+                {message}
+              </span>
 
               <button
                 type="button"
-                onClick={() => setMessage("")}
+                onClick={() =>
+                  setMessage("")
+                }
                 className="rounded-full p-1 hover:bg-emerald-500/10"
               >
                 <X size={16} />
@@ -1243,23 +1930,28 @@ export default function Settings() {
                   {profile?.avatar_url ? (
                     // eslint-disable-next-line @next/next/no-img-element
                     <img
-                      src={profile.avatar_url}
+                      src={
+                        profile.avatar_url
+                      }
                       alt="Profile avatar"
                       className="h-16 w-16 rounded-full border border-border object-cover"
                     />
                   ) : (
                     <div className="flex h-16 w-16 items-center justify-center rounded-full border border-white/10 bg-gradient-to-tr from-indigo-500 to-purple-600 text-xl font-bold text-white">
-                      {initials || "U"}
+                      {initials ||
+                        "U"}
                     </div>
                   )}
 
                   <div>
                     <h3 className="text-lg font-bold sx-title">
-                      {profile?.full_name || "User"}
+                      {profile?.full_name ||
+                        "User"}
                     </h3>
 
                     <p className="mt-1 text-xs sx-muted">
-                      {profile?.email || "No email found"}
+                      {profile?.email ||
+                        "No email found"}
                     </p>
 
                     <span className="mt-2 inline-block rounded-full border border-emerald-500/20 bg-emerald-500/10 px-2.5 py-0.5 font-mono text-[9px] font-semibold uppercase tracking-wider text-emerald-400">
@@ -1270,8 +1962,12 @@ export default function Settings() {
 
                 <button
                   type="button"
-                  onClick={handleSignOut}
-                  disabled={signingOut}
+                  onClick={
+                    handleSignOut
+                  }
+                  disabled={
+                    signingOut
+                  }
                   className="mt-6 flex w-full items-center justify-center gap-2 rounded-2xl border border-red-500/20 bg-red-500/10 px-5 py-3 text-sm font-semibold text-red-300 transition-colors hover:border-red-500/30 disabled:cursor-not-allowed disabled:opacity-60"
                 >
                   {signingOut ? (
@@ -1284,7 +1980,9 @@ export default function Settings() {
                     </>
                   ) : (
                     <>
-                      <LogOut size={16} />
+                      <LogOut
+                        size={16}
+                      />
                       Sign out
                     </>
                   )}
@@ -1292,956 +1990,1340 @@ export default function Settings() {
               </div>
 
               {/* SETTINGS SECTIONS */}
-              {sections.map((section) => (
-                <div
-                  key={section.title}
-                  className="space-y-4"
-                >
-                  <h3 className="ml-1 font-mono text-xs font-bold uppercase tracking-widest sx-muted">
-                    {section.title}
-                  </h3>
+              {sections.map(
+                (section) => (
+                  <div
+                    key={
+                      section.title
+                    }
+                    className="space-y-4"
+                  >
+                    <h3 className="ml-1 font-mono text-xs font-bold uppercase tracking-widest sx-muted">
+                      {
+                        section.title
+                      }
+                    </h3>
 
-                  <div className="sx-card overflow-hidden rounded-2xl">
-                    {section.items.map((item) => {
-                      const Icon = item.icon;
-                      const isExpanded =
-                        expandedItems.has(item.id);
+                    <div className="sx-card overflow-hidden rounded-2xl">
+                      {section.items.map(
+                        (item) => {
+                          const Icon =
+                            item.icon;
 
-                      return (
-                        <div key={item.id}>
-                          <button
-                            type="button"
-                            onClick={() =>
-                              toggleExpanded(item.id)
-                            }
-                            className={`flex w-full items-center justify-between border-b border-border/60 p-5 text-left transition-colors last:border-b-0 ${isExpanded
-                              ? "bg-primary/10"
-                              : "hover:bg-primary/5"
-                              }`}
-                          >
-                            <div className="flex items-center gap-4">
-                              <div
-                                className={`rounded-2xl border p-3 transition-colors ${isExpanded
-                                  ? "border-indigo-500/30 bg-indigo-500/10 text-indigo-300"
-                                  : "border-border bg-muted/60 text-muted-foreground"
+                          const isExpanded =
+                            expandedItems.has(
+                              item.id
+                            );
+
+                          return (
+                            <div
+                              key={
+                                item.id
+                              }
+                            >
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  toggleExpanded(
+                                    item.id
+                                  )
+                                }
+                                className={`flex w-full items-center justify-between border-b border-border/60 p-5 text-left transition-colors last:border-b-0 ${isExpanded
+                                    ? "bg-primary/10"
+                                    : "hover:bg-primary/5"
                                   }`}
                               >
-                                <Icon size={18} />
-                              </div>
+                                <div className="flex items-center gap-4">
+                                  <div
+                                    className={`rounded-2xl border p-3 transition-colors ${isExpanded
+                                        ? "border-indigo-500/30 bg-indigo-500/10 text-indigo-300"
+                                        : "border-border bg-muted/60 text-muted-foreground"
+                                      }`}
+                                  >
+                                    <Icon
+                                      size={
+                                        18
+                                      }
+                                    />
+                                  </div>
 
-                              <div>
-                                <h4 className="text-sm font-bold sx-title">
-                                  {item.name}
-                                </h4>
+                                  <div>
+                                    <h4 className="text-sm font-bold sx-title">
+                                      {
+                                        item.name
+                                      }
+                                    </h4>
 
-                                <p className="mt-0.5 text-xs sx-muted">
-                                  {item.desc}
-                                </p>
-                              </div>
-                            </div>
+                                    <p className="mt-0.5 text-xs sx-muted">
+                                      {
+                                        item.desc
+                                      }
+                                    </p>
+                                  </div>
+                                </div>
 
-                            <ChevronDown
-                              size={16}
-                              className={`transition-transform ${isExpanded
-                                ? "rotate-180 text-primary"
-                                : "text-muted-foreground"
-                                }`}
-                            />
-                          </button>
-
-                          {isExpanded && (
-                            <div className="border-b border-border/60 bg-primary/5 p-6">
-                              {/* PROFILE */}
-                              {item.id === "profile" && (
-                                <form
-                                  onSubmit={
-                                    handleSaveProfile
+                                <ChevronDown
+                                  size={
+                                    16
                                   }
-                                  className="space-y-6"
-                                >
-                                  <div>
-                                    <h2 className="font-mono text-xl font-bold sx-title">
-                                      Personal Profile
-                                    </h2>
+                                  className={`transition-transform ${isExpanded
+                                      ? "rotate-180 text-primary"
+                                      : "text-muted-foreground"
+                                    }`}
+                                />
+                              </button>
 
-                                    <p className="mt-2 text-sm sx-muted">
-                                      Update the name shown
-                                      across your SpendX
-                                      dashboard.
-                                    </p>
-                                  </div>
-
-                                  <div>
-                                    <label className="mb-2 block font-mono text-xs sx-muted">
-                                      Display Name
-                                    </label>
-
-                                    <input
-                                      type="text"
-                                      value={displayName}
-                                      onChange={(event) =>
-                                        setDisplayName(
-                                          event.target.value
-                                        )
-                                      }
-                                      placeholder="Enter your display name"
-                                      className="sx-field w-full rounded-xl px-4 py-3 text-sm placeholder:text-muted-foreground"
-                                    />
-                                  </div>
-
-                                  <div>
-                                    <label className="mb-2 block font-mono text-xs sx-muted">
-                                      Email Address
-                                    </label>
-
-                                    <input
-                                      type="email"
-                                      value={
-                                        profile?.email || ""
-                                      }
-                                      disabled
-                                      className="sx-field w-full cursor-not-allowed rounded-xl px-4 py-3 text-sm opacity-70"
-                                    />
-                                  </div>
-
-                                  <button
-                                    type="submit"
-                                    disabled={savingProfile}
-                                    className="sx-primary-button flex items-center justify-center gap-2 rounded-xl px-5 py-3 text-sm font-bold transition-transform hover:-translate-y-0.5 disabled:cursor-not-allowed disabled:opacity-60"
-                                  >
-                                    {savingProfile ? (
-                                      <>
-                                        <Loader2
-                                          size={16}
-                                          className="animate-spin"
-                                        />
-                                        Saving
-                                      </>
-                                    ) : (
-                                      <>
-                                        <Save size={16} />
-                                        Save Profile
-                                      </>
-                                    )}
-                                  </button>
-                                </form>
-                              )}
-
-                              {/* PAYMENTS */}
-                              {item.id === "payments" && (
-                                <div className="space-y-6">
-                                  <div>
-                                    <h2 className="font-mono text-xl font-bold sx-title">
-                                      Payment Portals
-                                    </h2>
-
-                                    <p className="mt-2 text-sm sx-muted">
-                                      Simulate linking a
-                                      payment account for
-                                      now.
-                                    </p>
-                                  </div>
-
-                                  <div className="sx-panel rounded-xl p-5">
-                                    <div className="flex items-center justify-between gap-4">
-                                      <div>
-                                        <h3 className="text-sm font-bold sx-title">
-                                          Bank/Card Connection
-                                        </h3>
-
-                                        <p className="mt-1 text-xs sx-muted">
-                                          {paymentConnected
-                                            ? "A payment portal is currently marked as connected."
-                                            : "No payment portal connected yet."}
-                                        </p>
-                                      </div>
-
-                                      <span
-                                        className={`rounded-full px-3 py-1 text-xs font-semibold ${paymentConnected
-                                          ? "bg-emerald-500/10 text-emerald-300"
-                                          : "bg-muted text-muted-foreground"
-                                          }`}
+                              {isExpanded && (
+                                <div className="border-b border-border/60 bg-primary/5 p-6">
+                                  {/* PROFILE */}
+                                  {item.id ===
+                                    "profile" && (
+                                      <form
+                                        onSubmit={
+                                          handleSaveProfile
+                                        }
+                                        className="space-y-6"
                                       >
-                                        {paymentConnected
-                                          ? "Connected"
-                                          : "Not connected"}
-                                      </span>
-                                    </div>
+                                        <div>
+                                          <h2 className="font-mono text-xl font-bold sx-title">
+                                            Personal Profile
+                                          </h2>
 
-                                    <button
-                                      type="button"
-                                      onClick={() =>
-                                        setPaymentConnected(
-                                          (current) =>
-                                            !current
-                                        )
-                                      }
-                                      className="sx-primary-button mt-5 rounded-xl px-5 py-3 text-sm font-bold transition-transform hover:-translate-y-0.5"
-                                    >
-                                      {paymentConnected
-                                        ? "Disconnect Portal"
-                                        : "Connect Portal"}
-                                    </button>
-                                  </div>
-
-                                  <button
-                                    type="button"
-                                    onClick={
-                                      savePreferences
-                                    }
-                                    disabled={
-                                      savingPreferences
-                                    }
-                                    className="sx-secondary-button flex items-center gap-2 rounded-xl px-5 py-3 text-sm font-semibold disabled:opacity-60"
-                                  >
-                                    {savingPreferences ? (
-                                      <Loader2
-                                        size={16}
-                                        className="animate-spin"
-                                      />
-                                    ) : (
-                                      <Save size={16} />
-                                    )}
-                                    Save Payment Settings
-                                  </button>
-                                </div>
-                              )}
-
-                              {/* ALERTS */}
-                              {item.id === "alerts" && (
-                                <div className="space-y-6">
-                                  <div>
-                                    <h2 className="font-mono text-xl font-bold sx-title">
-                                      Visual Alerts
-                                    </h2>
-
-                                    <p className="mt-2 text-sm sx-muted">
-                                      Choose how SpendX
-                                      should notify you.
-                                    </p>
-                                  </div>
-
-                                  <div className="space-y-4">
-                                    <div className="sx-panel flex items-center justify-between gap-4 rounded-xl p-5">
-                                      <div className="min-w-0">
-                                        <h3 className="text-sm font-bold sx-title">
-                                          Email Alerts
-                                        </h3>
-
-                                        <p className="mt-1 text-xs sx-muted">
-                                          Receive transaction
-                                          and report alerts
-                                          by email.
-                                        </p>
-                                      </div>
-
-                                      <SettingToggle
-                                        checked={emailAlerts}
-                                        onChange={() =>
-                                          setEmailAlerts(
-                                            (current) =>
-                                              !current
-                                          )
-                                        }
-                                      />
-                                    </div>
-
-                                    <div className="sx-panel flex items-center justify-between gap-4 rounded-xl p-5">
-                                      <div className="min-w-0">
-                                        <h3 className="text-sm font-bold sx-title">
-                                          Push Alerts
-                                        </h3>
-
-                                        <p className="mt-1 text-xs sx-muted">
-                                          Enable app-style
-                                          visual
-                                          notifications.
-                                        </p>
-                                      </div>
-
-                                      <SettingToggle
-                                        checked={pushAlerts}
-                                        onChange={() =>
-                                          setPushAlerts(
-                                            (current) =>
-                                              !current
-                                          )
-                                        }
-                                      />
-                                    </div>
-
-                                    <div className="sx-panel flex items-center justify-between gap-4 rounded-xl p-5">
-                                      <div className="min-w-0">
-                                        <h3 className="text-sm font-bold sx-title">
-                                          SMS Alerts
-                                        </h3>
-
-                                        <p className="mt-1 text-xs sx-muted">
-                                          Receive important
-                                          alerts by phone
-                                          message.
-                                        </p>
-                                      </div>
-
-                                      <SettingToggle
-                                        checked={smsAlerts}
-                                        onChange={() =>
-                                          setSmsAlerts(
-                                            (current) =>
-                                              !current
-                                          )
-                                        }
-                                      />
-                                    </div>
-                                  </div>
-
-                                  <button
-                                    type="button"
-                                    onClick={
-                                      savePreferences
-                                    }
-                                    disabled={
-                                      savingPreferences
-                                    }
-                                    className="sx-primary-button flex items-center gap-2 rounded-xl px-5 py-3 text-sm font-bold transition-transform hover:-translate-y-0.5 disabled:opacity-60"
-                                  >
-                                    {savingPreferences ? (
-                                      <Loader2
-                                        size={16}
-                                        className="animate-spin"
-                                      />
-                                    ) : (
-                                      <Save size={16} />
-                                    )}
-                                    Save Alert Settings
-                                  </button>
-                                </div>
-                              )}
-
-                              {/* SECURITY */}
-                              {item.id === "security" && (
-                                <div className="space-y-6">
-                                  <div>
-                                    <h2 className="font-mono text-xl font-bold sx-title">
-                                      Security Protocols
-                                    </h2>
-
-                                    <p className="mt-2 text-sm sx-muted">
-                                      Control security
-                                      preferences for your
-                                      account.
-                                    </p>
-                                  </div>
-
-                                  <div className="space-y-4">
-                                    <div className="sx-panel flex items-center justify-between gap-4 rounded-xl p-5">
-                                      <div className="min-w-0">
-                                        <div className="flex items-center gap-2.5">
-                                          <div className="rounded-xl border border-primary/20 bg-primary/10 p-2 text-primary">
-                                            <ShieldCheck size={18} />
-                                          </div>
-                                          <div>
-                                            <div className="flex items-center gap-2">
-                                              <h3 className="text-sm font-bold sx-title">
-                                                Two-Factor Authentication (TOTP)
-                                              </h3>
-                                              {twoFactor ? (
-                                                <span className="inline-flex items-center gap-1 rounded-full border border-emerald-500/20 bg-emerald-500/10 px-2.5 py-0.5 text-[10px] font-semibold text-emerald-400">
-                                                  Active
-                                                </span>
-                                              ) : (
-                                                <span className="inline-flex items-center gap-1 rounded-full border border-zinc-500/20 bg-zinc-500/10 px-2.5 py-0.5 text-[10px] font-semibold text-zinc-400">
-                                                  Disabled
-                                                </span>
-                                              )}
-                                            </div>
-                                            <p className="mt-1 text-xs sx-muted">
-                                              Protect your account with a time-based one-time password (TOTP) using Google Authenticator, Authy, or 1Password.
-                                            </p>
-                                          </div>
+                                          <p className="mt-2 text-sm sx-muted">
+                                            Update the name shown
+                                            across your SpendX
+                                            dashboard.
+                                          </p>
                                         </div>
-                                      </div>
 
-                                      <div className="flex shrink-0 items-center gap-3">
-                                        {mfaBusy && (
-                                          <Loader2
-                                            size={16}
-                                            className="animate-spin text-primary"
+                                        <div>
+                                          <label className="mb-2 block font-mono text-xs sx-muted">
+                                            Display Name
+                                          </label>
+
+                                          <input
+                                            type="text"
+                                            value={
+                                              displayName
+                                            }
+                                            onChange={(
+                                              event
+                                            ) =>
+                                              setDisplayName(
+                                                event
+                                                  .target
+                                                  .value
+                                              )
+                                            }
+                                            placeholder="Enter your display name"
+                                            className="sx-field w-full rounded-xl px-4 py-3 text-sm placeholder:text-muted-foreground"
                                           />
-                                        )}
-                                        <SettingToggle
-                                          checked={twoFactor}
-                                          disabled={mfaBusy || mfaLoading}
-                                          onChange={handleTwoFactorToggle}
-                                          label={
-                                            twoFactor
-                                              ? "Disable Two-Factor Authentication"
-                                              : "Enable Two-Factor Authentication"
+                                        </div>
+
+                                        <div>
+                                          <label className="mb-2 block font-mono text-xs sx-muted">
+                                            Email Address
+                                          </label>
+
+                                          <input
+                                            type="email"
+                                            value={
+                                              profile?.email ||
+                                              ""
+                                            }
+                                            disabled
+                                            className="sx-field w-full cursor-not-allowed rounded-xl px-4 py-3 text-sm opacity-70"
+                                          />
+                                        </div>
+
+                                        <button
+                                          type="submit"
+                                          disabled={
+                                            savingProfile
                                           }
-                                        />
-                                      </div>
-                                    </div>
-
-                                    <div className="sx-panel rounded-xl p-5">
-                                      <div className="flex items-center justify-between gap-4">
-                                        <div className="flex min-w-0 items-start gap-3">
-                                          <div className="mt-0.5 rounded-xl border border-primary/20 bg-primary/10 p-2 text-primary">
-                                            <Fingerprint size={18} />
-                                          </div>
-
-                                          <div className="min-w-0">
-                                            <h3 className="text-sm font-bold sx-title">
-                                              Biometric Lock
-                                            </h3>
-
-                                            <p className="mt-1 text-xs sx-muted">
-                                              Require your device&apos;s
-                                              biometric or user-verifying
-                                              platform authenticator when
-                                              SpendX requests biometric
-                                              verification.
-                                            </p>
-                                          </div>
-                                        </div>
-
-                                        <div className="flex shrink-0 items-center gap-3">
-                                          {biometricBusy && (
-                                            <Loader2
-                                              size={16}
-                                              className="animate-spin text-primary"
-                                            />
+                                          className="sx-primary-button flex items-center justify-center gap-2 rounded-xl px-5 py-3 text-sm font-bold transition-transform hover:-translate-y-0.5 disabled:cursor-not-allowed disabled:opacity-60"
+                                        >
+                                          {savingProfile ? (
+                                            <>
+                                              <Loader2
+                                                size={
+                                                  16
+                                                }
+                                                className="animate-spin"
+                                              />
+                                              Saving
+                                            </>
+                                          ) : (
+                                            <>
+                                              <Save
+                                                size={
+                                                  16
+                                                }
+                                              />
+                                              Save Profile
+                                            </>
                                           )}
+                                        </button>
+                                      </form>
+                                    )}
 
-                                          <SettingToggle
-                                            checked={biometricLock}
-                                            onChange={
-                                              handleBiometricToggle
-                                            }
-                                            label={
-                                              biometricLock
-                                                ? "Disable Biometric Lock"
-                                                : "Enable Biometric Lock"
-                                            }
-                                          />
+                                  {/* PAYMENTS */}
+                                  {item.id ===
+                                    "payments" && (
+                                      <div className="space-y-6">
+                                        <div>
+                                          <h2 className="font-mono text-xl font-bold sx-title">
+                                            Payment Portals
+                                          </h2>
+
+                                          <p className="mt-2 text-sm sx-muted">
+                                            Simulate linking a
+                                            payment account for
+                                            now.
+                                          </p>
                                         </div>
-                                      </div>
 
-                                      <div className="mt-4 rounded-xl border border-border/60 bg-background/30 px-4 py-3">
-                                        <div className="flex items-center justify-between gap-4">
-                                          <div>
-                                            <p className="text-xs font-semibold sx-title">
-                                              Device support
-                                            </p>
+                                        <div className="sx-panel rounded-xl p-5">
+                                          <div className="flex items-center justify-between gap-4">
+                                            <div>
+                                              <h3 className="text-sm font-bold sx-title">
+                                                Bank/Card Connection
+                                              </h3>
 
-                                            <p className="mt-1 text-[11px] sx-muted">
-                                              {biometricAvailable === null
-                                                ? "Checking device support..."
-                                                : biometricAvailable
-                                                  ? "A user-verifying platform authenticator is available."
-                                                  : "Biometric authentication is unavailable on this device or browser."}
-                                            </p>
+                                              <p className="mt-1 text-xs sx-muted">
+                                                {paymentConnected
+                                                  ? "A payment portal is currently marked as connected."
+                                                  : "No payment portal connected yet."}
+                                              </p>
+                                            </div>
+
+                                            <span
+                                              className={`rounded-full px-3 py-1 text-xs font-semibold ${paymentConnected
+                                                  ? "bg-emerald-500/10 text-emerald-300"
+                                                  : "bg-muted text-muted-foreground"
+                                                }`}
+                                            >
+                                              {paymentConnected
+                                                ? "Connected"
+                                                : "Not connected"}
+                                            </span>
                                           </div>
 
-                                          <span
-                                            className={`rounded-full px-3 py-1 text-[10px] font-semibold ${biometricAvailable === true
-                                              ? "bg-emerald-500/10 text-emerald-300"
-                                              : biometricAvailable === false
-                                                ? "bg-red-500/10 text-red-300"
-                                                : "bg-muted text-muted-foreground"
-                                              }`}
+                                          <button
+                                            type="button"
+                                            onClick={() =>
+                                              setPaymentConnected(
+                                                (
+                                                  current
+                                                ) =>
+                                                  !current
+                                              )
+                                            }
+                                            className="sx-primary-button mt-5 rounded-xl px-5 py-3 text-sm font-bold transition-transform hover:-translate-y-0.5"
                                           >
-                                            {biometricAvailable === true
-                                              ? "Available"
-                                              : biometricAvailable === false
-                                                ? "Unavailable"
-                                                : "Checking"}
-                                          </span>
+                                            {paymentConnected
+                                              ? "Disconnect Portal"
+                                              : "Connect Portal"}
+                                          </button>
                                         </div>
-                                      </div>
 
-                                      {biometricLock && (
                                         <button
                                           type="button"
                                           onClick={
-                                            handleBiometricVerification
+                                            savePreferences
                                           }
-                                          disabled={biometricBusy}
-                                          className="sx-secondary-button mt-4 flex items-center gap-2 rounded-xl px-4 py-2.5 text-xs font-semibold disabled:cursor-not-allowed disabled:opacity-60"
+                                          disabled={
+                                            savingPreferences
+                                          }
+                                          className="sx-secondary-button flex items-center gap-2 rounded-xl px-5 py-3 text-sm font-semibold disabled:opacity-60"
                                         >
-                                          {biometricBusy ? (
+                                          {savingPreferences ? (
                                             <Loader2
-                                              size={14}
+                                              size={
+                                                16
+                                              }
                                               className="animate-spin"
                                             />
                                           ) : (
-                                            <Fingerprint size={14} />
+                                            <Save
+                                              size={
+                                                16
+                                              }
+                                            />
                                           )}
-                                          Test Biometric Verification
+                                          Save Payment Settings
                                         </button>
-                                      )}
-                                    </div>
-                                  </div>
-
-                                  <button
-                                    type="button"
-                                    onClick={
-                                      savePreferences
-                                    }
-                                    disabled={
-                                      savingPreferences
-                                    }
-                                    className="sx-primary-button flex items-center gap-2 rounded-xl px-5 py-3 text-sm font-bold transition-transform hover:-translate-y-0.5 disabled:opacity-60"
-                                  >
-                                    {savingPreferences ? (
-                                      <Loader2
-                                        size={16}
-                                        className="animate-spin"
-                                      />
-                                    ) : (
-                                      <Shield size={16} />
+                                      </div>
                                     )}
-                                    Save Security Settings
-                                  </button>
-                                </div>
-                              )}
 
-                              {/* MONTHLY SPENDING LIMIT */}
-                              {item.id === "spendingLimit" && (
-                                <div className="space-y-6">
-                                  <div>
-                                    <h2 className="font-mono text-xl font-bold sx-title">
-                                      Monthly Spending Limit
-                                    </h2>
+                                  {/* ALERTS */}
+                                  {item.id ===
+                                    "alerts" && (
+                                      <div className="space-y-6">
+                                        <div>
+                                          <h2 className="font-mono text-xl font-bold sx-title">
+                                            System Alerts
+                                          </h2>
 
-                                    <p className="mt-2 text-sm sx-muted">
-                                      Set a monthly spending
-                                      limit to help control
-                                      your expenses and avoid
-                                      overspending.
-                                    </p>
-                                  </div>
+                                          <p className="mt-2 text-sm sx-muted">
+                                            Choose how SpendX
+                                            should notify you.
+                                          </p>
+                                        </div>
 
-                                  <div>
-                                    <label className="mb-2 block font-mono text-xs sx-muted">
-                                      Monthly Limit ({currency})
-                                    </label>
+                                        <div className="space-y-4">
+                                          {/* EMAIL */}
+                                          <div className="sx-panel flex items-center justify-between gap-4 rounded-xl p-5">
+                                            <div className="min-w-0">
+                                              <h3 className="text-sm font-bold sx-title">
+                                                Email Alerts
+                                              </h3>
 
-                                    <input
-                                      type="number"
-                                      min="0.01"
-                                      step="0.01"
-                                      value={monthlyLimit}
-                                      onChange={(event) =>
-                                        setMonthlyLimit(
-                                          event.target.value
-                                        )
-                                      }
-                                      placeholder="Enter monthly spending limit"
-                                      className="sx-field w-full rounded-xl px-4 py-3 text-sm placeholder:text-muted-foreground"
-                                    />
+                                              <p className="mt-1 text-xs sx-muted">
+                                                Receive transaction
+                                                and report alerts
+                                                by email.
+                                              </p>
+                                            </div>
 
-                                    <p className="mt-2 text-xs sx-muted">
-                                      This limit will
-                                      automatically apply to
-                                      each month until you
-                                      change it.
-                                    </p>
-                                  </div>
-
-                                  {monthlyLimit &&
-                                    Number(monthlyLimit) > 0 && (
-                                      <div className="sx-panel rounded-xl p-5">
-                                        <div className="flex items-center justify-between gap-4">
-                                          <div>
-                                            <p className="text-xs sx-muted">
-                                              Current monthly
-                                              limit
-                                            </p>
-
-                                            <p className="mt-1 font-mono text-xl font-bold sx-title">
-                                              {currency}{" "}
-                                              {Number(
-                                                monthlyLimit
-                                              ).toLocaleString(
-                                                undefined,
-                                                {
-                                                  minimumFractionDigits: 2,
-                                                  maximumFractionDigits: 2,
-                                                }
-                                              )}
-                                            </p>
+                                            <SettingToggle
+                                              checked={
+                                                emailAlerts
+                                              }
+                                              onChange={() =>
+                                                setEmailAlerts(
+                                                  (
+                                                    current
+                                                  ) =>
+                                                    !current
+                                                )
+                                              }
+                                            />
                                           </div>
 
-                                          <span className="rounded-full border border-emerald-500/20 bg-emerald-500/10 px-3 py-1 text-xs font-semibold text-emerald-300">
-                                            Active
-                                          </span>
+                                          {/* PUSH */}
+                                          <div className="sx-panel flex items-center justify-between gap-4 rounded-xl p-5">
+                                            <div className="min-w-0">
+                                              <h3 className="text-sm font-bold sx-title">
+                                                Push Alerts
+                                              </h3>
+
+                                              <p className="mt-1 text-xs sx-muted">
+                                                Receive real browser
+                                                or system notifications
+                                                from SpendX.
+                                              </p>
+
+                                              {notificationBusy && (
+                                                <p className="mt-2 text-[11px] text-primary">
+                                                  Requesting
+                                                  notification
+                                                  permission...
+                                                </p>
+                                              )}
+                                            </div>
+
+                                            <div className="flex shrink-0 items-center gap-3">
+                                              {notificationBusy && (
+                                                <Loader2
+                                                  size={
+                                                    16
+                                                  }
+                                                  className="animate-spin text-primary"
+                                                />
+                                              )}
+
+                                              <SettingToggle
+                                                checked={
+                                                  pushAlerts
+                                                }
+                                                disabled={
+                                                  notificationBusy
+                                                }
+                                                onChange={
+                                                  handlePushAlertsToggle
+                                                }
+                                                label={
+                                                  pushAlerts
+                                                    ? "Disable Push Alerts"
+                                                    : "Enable Push Alerts"
+                                                }
+                                              />
+                                            </div>
+                                          </div>
+
+                                          {/* DAILY EXPENSE REMINDER */}
+                                          <div className="sx-panel rounded-xl p-5">
+                                            <div className="flex items-center justify-between gap-4">
+                                              <div className="min-w-0">
+                                                <h3 className="text-sm font-bold sx-title">
+                                                  Daily Expense Reminder
+                                                </h3>
+
+                                                <p className="mt-1 text-xs sx-muted">
+                                                  Receive a daily reminder
+                                                  to record your expenses.
+                                                </p>
+                                              </div>
+
+                                              <div className="flex shrink-0 items-center gap-3">
+                                                {dailyReminderBusy && (
+                                                  <Loader2
+                                                    size={
+                                                      16
+                                                    }
+                                                    className="animate-spin text-primary"
+                                                  />
+                                                )}
+
+                                                <SettingToggle
+                                                  checked={
+                                                    dailyExpenseReminder
+                                                  }
+                                                  disabled={
+                                                    dailyReminderBusy
+                                                  }
+                                                  onChange={
+                                                    handleDailyReminderToggle
+                                                  }
+                                                  label={
+                                                    dailyExpenseReminder
+                                                      ? "Disable Daily Expense Reminder"
+                                                      : "Enable Daily Expense Reminder"
+                                                  }
+                                                />
+                                              </div>
+                                            </div>
+
+                                            {dailyExpenseReminder && (
+                                              <div className="mt-5 rounded-xl border border-border/60 bg-background/30 p-4">
+                                                <label className="mb-2 block font-mono text-xs sx-muted">
+                                                  Reminder Time
+                                                </label>
+
+                                                <input
+                                                  type="time"
+                                                  value={
+                                                    dailyReminderTime
+                                                  }
+                                                  onChange={(
+                                                    event
+                                                  ) =>
+                                                    void handleDailyReminderTimeChange(
+                                                      event
+                                                        .target
+                                                        .value
+                                                    )
+                                                  }
+                                                  disabled={
+                                                    dailyReminderBusy
+                                                  }
+                                                  className="sx-field w-full rounded-xl px-4 py-3 text-sm disabled:cursor-not-allowed disabled:opacity-60"
+                                                />
+
+                                                <p className="mt-2 text-[11px] sx-muted">
+                                                  SpendX will remind
+                                                  you every day at{" "}
+                                                  <span className="font-semibold sx-title">
+                                                    {
+                                                      dailyReminderTime
+                                                    }
+                                                  </span>
+                                                  .
+                                                </p>
+                                              </div>
+                                            )}
+                                          </div>
+
+                                          {/* SMS */}
+                                          <div className="sx-panel flex items-center justify-between gap-4 rounded-xl p-5">
+                                            <div className="min-w-0">
+                                              <h3 className="text-sm font-bold sx-title">
+                                                SMS Alerts
+                                              </h3>
+
+                                              <p className="mt-1 text-xs sx-muted">
+                                                Receive important
+                                                alerts by phone
+                                                message.
+                                              </p>
+                                            </div>
+
+                                            <SettingToggle
+                                              checked={
+                                                smsAlerts
+                                              }
+                                              onChange={() =>
+                                                setSmsAlerts(
+                                                  (
+                                                    current
+                                                  ) =>
+                                                    !current
+                                                )
+                                              }
+                                            />
+                                          </div>
+                                        </div>
+
+                                        <button
+                                          type="button"
+                                          onClick={
+                                            savePreferences
+                                          }
+                                          disabled={
+                                            savingPreferences
+                                          }
+                                          className="sx-primary-button flex items-center gap-2 rounded-xl px-5 py-3 text-sm font-bold transition-transform hover:-translate-y-0.5 disabled:opacity-60"
+                                        >
+                                          {savingPreferences ? (
+                                            <Loader2
+                                              size={
+                                                16
+                                              }
+                                              className="animate-spin"
+                                            />
+                                          ) : (
+                                            <Save
+                                              size={
+                                                16
+                                              }
+                                            />
+                                          )}
+
+                                          Save Alert Settings
+                                        </button>
+                                      </div>
+                                    )}
+
+                                  {/* SECURITY */}
+                                  {item.id ===
+                                    "security" && (
+                                      <div className="space-y-6">
+                                        <div>
+                                          <h2 className="font-mono text-xl font-bold sx-title">
+                                            Security Protocols
+                                          </h2>
+
+                                          <p className="mt-2 text-sm sx-muted">
+                                            Control security
+                                            preferences for your
+                                            account.
+                                          </p>
+                                        </div>
+
+                                        <div className="space-y-4">
+                                          {/* 2FA */}
+                                          <div className="sx-panel flex items-center justify-between gap-4 rounded-xl p-5">
+                                            <div className="min-w-0">
+                                              <div className="flex items-center gap-2.5">
+                                                <div className="rounded-xl border border-primary/20 bg-primary/10 p-2 text-primary">
+                                                  <ShieldCheck
+                                                    size={
+                                                      18
+                                                    }
+                                                  />
+                                                </div>
+
+                                                <div>
+                                                  <div className="flex items-center gap-2">
+                                                    <h3 className="text-sm font-bold sx-title">
+                                                      Two-Factor Authentication (TOTP)
+                                                    </h3>
+
+                                                    {twoFactor ? (
+                                                      <span className="inline-flex items-center gap-1 rounded-full border border-emerald-500/20 bg-emerald-500/10 px-2.5 py-0.5 text-[10px] font-semibold text-emerald-400">
+                                                        Active
+                                                      </span>
+                                                    ) : (
+                                                      <span className="inline-flex items-center gap-1 rounded-full border border-zinc-500/20 bg-zinc-500/10 px-2.5 py-0.5 text-[10px] font-semibold text-zinc-400">
+                                                        Disabled
+                                                      </span>
+                                                    )}
+                                                  </div>
+
+                                                  <p className="mt-1 text-xs sx-muted">
+                                                    Protect your account
+                                                    with a time-based
+                                                    one-time password
+                                                    (TOTP) using Google
+                                                    Authenticator, Authy,
+                                                    or 1Password.
+                                                  </p>
+                                                </div>
+                                              </div>
+                                            </div>
+
+                                            <div className="flex shrink-0 items-center gap-3">
+                                              {mfaBusy && (
+                                                <Loader2
+                                                  size={
+                                                    16
+                                                  }
+                                                  className="animate-spin text-primary"
+                                                />
+                                              )}
+
+                                              <SettingToggle
+                                                checked={
+                                                  twoFactor
+                                                }
+                                                disabled={
+                                                  mfaBusy ||
+                                                  mfaLoading
+                                                }
+                                                onChange={
+                                                  handleTwoFactorToggle
+                                                }
+                                                label={
+                                                  twoFactor
+                                                    ? "Disable Two-Factor Authentication"
+                                                    : "Enable Two-Factor Authentication"
+                                                }
+                                              />
+                                            </div>
+                                          </div>
+
+                                          {/* BIOMETRIC */}
+                                          <div className="sx-panel rounded-xl p-5">
+                                            <div className="flex items-center justify-between gap-4">
+                                              <div className="flex min-w-0 items-start gap-3">
+                                                <div className="mt-0.5 rounded-xl border border-primary/20 bg-primary/10 p-2 text-primary">
+                                                  <Fingerprint
+                                                    size={
+                                                      18
+                                                    }
+                                                  />
+                                                </div>
+
+                                                <div className="min-w-0">
+                                                  <h3 className="text-sm font-bold sx-title">
+                                                    Biometric Lock
+                                                  </h3>
+
+                                                  <p className="mt-1 text-xs sx-muted">
+                                                    Require your device&apos;s
+                                                    biometric or
+                                                    user-verifying
+                                                    platform authenticator
+                                                    when SpendX requests
+                                                    biometric verification.
+                                                  </p>
+                                                </div>
+                                              </div>
+
+                                              <div className="flex shrink-0 items-center gap-3">
+                                                {biometricBusy && (
+                                                  <Loader2
+                                                    size={
+                                                      16
+                                                    }
+                                                    className="animate-spin text-primary"
+                                                  />
+                                                )}
+
+                                                <SettingToggle
+                                                  checked={
+                                                    biometricLock
+                                                  }
+                                                  onChange={
+                                                    handleBiometricToggle
+                                                  }
+                                                  label={
+                                                    biometricLock
+                                                      ? "Disable Biometric Lock"
+                                                      : "Enable Biometric Lock"
+                                                  }
+                                                />
+                                              </div>
+                                            </div>
+
+                                            <div className="mt-4 rounded-xl border border-border/60 bg-background/30 px-4 py-3">
+                                              <div className="flex items-center justify-between gap-4">
+                                                <div>
+                                                  <p className="text-xs font-semibold sx-title">
+                                                    Device support
+                                                  </p>
+
+                                                  <p className="mt-1 text-[11px] sx-muted">
+                                                    {biometricAvailable ===
+                                                      null
+                                                      ? "Checking device support..."
+                                                      : biometricAvailable
+                                                        ? "A user-verifying platform authenticator is available."
+                                                        : "Biometric authentication is unavailable on this device or browser."}
+                                                  </p>
+                                                </div>
+
+                                                <span
+                                                  className={`rounded-full px-3 py-1 text-[10px] font-semibold ${biometricAvailable ===
+                                                      true
+                                                      ? "bg-emerald-500/10 text-emerald-300"
+                                                      : biometricAvailable ===
+                                                        false
+                                                        ? "bg-red-500/10 text-red-300"
+                                                        : "bg-muted text-muted-foreground"
+                                                    }`}
+                                                >
+                                                  {biometricAvailable ===
+                                                    true
+                                                    ? "Available"
+                                                    : biometricAvailable ===
+                                                      false
+                                                      ? "Unavailable"
+                                                      : "Checking"}
+                                                </span>
+                                              </div>
+                                            </div>
+
+                                            {biometricLock && (
+                                              <button
+                                                type="button"
+                                                onClick={
+                                                  handleBiometricVerification
+                                                }
+                                                disabled={
+                                                  biometricBusy
+                                                }
+                                                className="sx-secondary-button mt-4 flex items-center gap-2 rounded-xl px-4 py-2.5 text-xs font-semibold disabled:cursor-not-allowed disabled:opacity-60"
+                                              >
+                                                {biometricBusy ? (
+                                                  <Loader2
+                                                    size={
+                                                      14
+                                                    }
+                                                    className="animate-spin"
+                                                  />
+                                                ) : (
+                                                  <Fingerprint
+                                                    size={
+                                                      14
+                                                    }
+                                                  />
+                                                )}
+
+                                                Test Biometric Verification
+                                              </button>
+                                            )}
+                                          </div>
+                                        </div>
+
+                                        <button
+                                          type="button"
+                                          onClick={
+                                            savePreferences
+                                          }
+                                          disabled={
+                                            savingPreferences
+                                          }
+                                          className="sx-primary-button flex items-center gap-2 rounded-xl px-5 py-3 text-sm font-bold transition-transform hover:-translate-y-0.5 disabled:opacity-60"
+                                        >
+                                          {savingPreferences ? (
+                                            <Loader2
+                                              size={
+                                                16
+                                              }
+                                              className="animate-spin"
+                                            />
+                                          ) : (
+                                            <Shield
+                                              size={
+                                                16
+                                              }
+                                            />
+                                          )}
+
+                                          Save Security Settings
+                                        </button>
+                                      </div>
+                                    )}
+
+                                  {/* MONTHLY SPENDING LIMIT */}
+                                  {item.id ===
+                                    "spendingLimit" && (
+                                      <div className="space-y-6">
+                                        <div>
+                                          <h2 className="font-mono text-xl font-bold sx-title">
+                                            Monthly Spending Limit
+                                          </h2>
+
+                                          <p className="mt-2 text-sm sx-muted">
+                                            Set a monthly spending
+                                            limit to help control
+                                            your expenses and avoid
+                                            overspending.
+                                          </p>
+                                        </div>
+
+                                        <div>
+                                          <label className="mb-2 block font-mono text-xs sx-muted">
+                                            Monthly Limit (
+                                            {
+                                              currency
+                                            }
+                                            )
+                                          </label>
+
+                                          <input
+                                            type="number"
+                                            min="0.01"
+                                            step="0.01"
+                                            value={
+                                              monthlyLimit
+                                            }
+                                            onChange={(
+                                              event
+                                            ) =>
+                                              setMonthlyLimit(
+                                                event
+                                                  .target
+                                                  .value
+                                              )
+                                            }
+                                            placeholder="Enter monthly spending limit"
+                                            className="sx-field w-full rounded-xl px-4 py-3 text-sm placeholder:text-muted-foreground"
+                                          />
+
+                                          <p className="mt-2 text-xs sx-muted">
+                                            This limit will
+                                            automatically apply to
+                                            each month until you
+                                            change it.
+                                          </p>
+                                        </div>
+
+                                        {monthlyLimit &&
+                                          Number(
+                                            monthlyLimit
+                                          ) > 0 && (
+                                            <div className="sx-panel rounded-xl p-5">
+                                              <div className="flex items-center justify-between gap-4">
+                                                <div>
+                                                  <p className="text-xs sx-muted">
+                                                    Current monthly
+                                                    limit
+                                                  </p>
+
+                                                  <p className="mt-1 font-mono text-xl font-bold sx-title">
+                                                    {
+                                                      currency
+                                                    }{" "}
+                                                    {Number(
+                                                      monthlyLimit
+                                                    ).toLocaleString(
+                                                      undefined,
+                                                      {
+                                                        minimumFractionDigits: 2,
+                                                        maximumFractionDigits: 2,
+                                                      }
+                                                    )}
+                                                  </p>
+                                                </div>
+
+                                                <span className="rounded-full border border-emerald-500/20 bg-emerald-500/10 px-3 py-1 text-xs font-semibold text-emerald-300">
+                                                  Active
+                                                </span>
+                                              </div>
+                                            </div>
+                                          )}
+
+                                        <button
+                                          type="button"
+                                          onClick={
+                                            saveMonthlySpendingLimit
+                                          }
+                                          disabled={
+                                            savingMonthlyLimit
+                                          }
+                                          className="sx-primary-button flex items-center gap-2 rounded-xl px-5 py-3 text-sm font-bold transition-transform hover:-translate-y-0.5 disabled:cursor-not-allowed disabled:opacity-60"
+                                        >
+                                          {savingMonthlyLimit ? (
+                                            <>
+                                              <Loader2
+                                                size={
+                                                  16
+                                                }
+                                                className="animate-spin"
+                                              />
+                                              Saving...
+                                            </>
+                                          ) : (
+                                            <>
+                                              <Save
+                                                size={
+                                                  16
+                                                }
+                                              />
+                                              Save Spending Limit
+                                            </>
+                                          )}
+                                        </button>
+                                      </div>
+                                    )}
+
+                                  {/* LOCALIZATION */}
+                                  {item.id ===
+                                    "localization" && (
+                                      <div className="space-y-6">
+                                        <div>
+                                          <h2 className="font-mono text-xl font-bold sx-title">
+                                            Localization
+                                          </h2>
+
+                                          <p className="mt-2 text-sm sx-muted">
+                                            Choose your preferred
+                                            currency and language.
+                                          </p>
+                                        </div>
+
+                                        <div>
+                                          <label className="mb-2 block font-mono text-xs sx-muted">
+                                            Currency
+                                          </label>
+
+                                          <select
+                                            value={
+                                              currency
+                                            }
+                                            onChange={(
+                                              event
+                                            ) =>
+                                              setCurrency(
+                                                event
+                                                  .target
+                                                  .value as CurrencyCode
+                                              )
+                                            }
+                                            className="sx-field w-full rounded-xl px-4 py-3 text-sm"
+                                          >
+                                            {currencies.map(
+                                              (
+                                                item
+                                              ) => (
+                                                <option
+                                                  key={
+                                                    item.code
+                                                  }
+                                                  value={
+                                                    item.code
+                                                  }
+                                                >
+                                                  {
+                                                    item.code
+                                                  }{" "}
+                                                  —{" "}
+                                                  {
+                                                    item.name
+                                                  }
+                                                </option>
+                                              )
+                                            )}
+                                          </select>
+                                        </div>
+
+                                        <div>
+                                          <label className="mb-2 block font-mono text-xs sx-muted">
+                                            Language
+                                          </label>
+
+                                          <select
+                                            value={
+                                              language
+                                            }
+                                            onChange={(
+                                              event
+                                            ) =>
+                                              setLanguage(
+                                                event
+                                                  .target
+                                                  .value
+                                              )
+                                            }
+                                            className="sx-field w-full rounded-xl px-4 py-3 text-sm"
+                                          >
+                                            <option value="English">
+                                              English
+                                            </option>
+
+                                            <option value="Hindi">
+                                              Hindi
+                                            </option>
+
+                                            <option value="Malayalam">
+                                              Malayalam
+                                            </option>
+
+                                            <option value="Tamil">
+                                              Tamil
+                                            </option>
+                                          </select>
+                                        </div>
+
+                                        <div className="sx-panel rounded-xl p-4">
+                                          <div className="flex items-center justify-between gap-4">
+                                            <div>
+                                              <p className="text-xs sx-muted">
+                                                Current currency
+                                              </p>
+
+                                              <p className="mt-1 font-mono text-lg font-bold sx-title">
+                                                {
+                                                  currency
+                                                }
+                                              </p>
+                                            </div>
+
+                                            <span className="rounded-full border border-emerald-500/20 bg-emerald-500/10 px-3 py-1 text-xs font-semibold text-emerald-300">
+                                              Ready
+                                            </span>
+                                          </div>
+                                        </div>
+
+                                        <button
+                                          type="button"
+                                          onClick={
+                                            savePreferences
+                                          }
+                                          disabled={
+                                            savingPreferences
+                                          }
+                                          className="sx-primary-button flex items-center gap-2 rounded-xl px-5 py-3 text-sm font-bold transition-transform hover:-translate-y-0.5 disabled:opacity-60"
+                                        >
+                                          {savingPreferences ? (
+                                            <>
+                                              <Loader2
+                                                size={
+                                                  16
+                                                }
+                                                className="animate-spin"
+                                              />
+                                              Saving...
+                                            </>
+                                          ) : (
+                                            <>
+                                              <Check
+                                                size={
+                                                  16
+                                                }
+                                              />
+                                              Save Localization
+                                            </>
+                                          )}
+                                        </button>
+                                      </div>
+                                    )}
+
+                                  {/* APPEARANCE */}
+                                  {item.id ===
+                                    "appearance" && (
+                                      <div className="space-y-6">
+                                        <div>
+                                          <h2 className="font-mono text-xl font-bold sx-title">
+                                            Appearance
+                                          </h2>
+
+                                          <p className="mt-2 text-sm sx-muted">
+                                            Choose the workspace
+                                            theme that feels
+                                            best for your finance
+                                            review sessions.
+                                          </p>
+                                        </div>
+
+                                        <div className="sx-panel flex flex-col gap-5 rounded-xl p-5 sm:flex-row sm:items-center sm:justify-between">
+                                          <div className="flex min-w-0 items-center gap-4">
+                                            <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl border border-primary/20 bg-primary/10 text-primary">
+                                              {theme ===
+                                                "dark" ? (
+                                                <Moon
+                                                  size={
+                                                    20
+                                                  }
+                                                />
+                                              ) : (
+                                                <Sun
+                                                  size={
+                                                    20
+                                                  }
+                                                />
+                                              )}
+                                            </div>
+
+                                            <div className="min-w-0">
+                                              <h3 className="text-sm font-bold sx-title">
+                                                {theme ===
+                                                  "dark"
+                                                  ? "Dark Mode"
+                                                  : "Light Mode"}
+                                              </h3>
+
+                                              <p className="mt-1 text-xs sx-muted">
+                                                Slider preference
+                                                is saved on this
+                                                device.
+                                              </p>
+                                            </div>
+                                          </div>
+
+                                          <div className="flex w-full justify-center sm:w-auto sm:justify-end">
+                                            <ThemeSlider />
+                                          </div>
                                         </div>
                                       </div>
                                     )}
-
-                                  <button
-                                    type="button"
-                                    onClick={
-                                      saveMonthlySpendingLimit
-                                    }
-                                    disabled={
-                                      savingMonthlyLimit
-                                    }
-                                    className="sx-primary-button flex items-center gap-2 rounded-xl px-5 py-3 text-sm font-bold transition-transform hover:-translate-y-0.5 disabled:cursor-not-allowed disabled:opacity-60"
-                                  >
-                                    {savingMonthlyLimit ? (
-                                      <>
-                                        <Loader2
-                                          size={16}
-                                          className="animate-spin"
-                                        />
-                                        Saving...
-                                      </>
-                                    ) : (
-                                      <>
-                                        <Save size={16} />
-                                        Save Spending Limit
-                                      </>
-                                    )}
-                                  </button>
-                                </div>
-                              )}
-
-                              {/* LOCALIZATION */}
-                              {item.id === "localization" && (
-                                <div className="space-y-6">
-                                  <div>
-                                    <h2 className="font-mono text-xl font-bold sx-title">
-                                      Localization
-                                    </h2>
-
-                                    <p className="mt-2 text-sm sx-muted">
-                                      Choose your preferred
-                                      currency and language.
-                                    </p>
-                                  </div>
-
-                                  <div>
-                                    <label className="mb-2 block font-mono text-xs sx-muted">
-                                      Currency
-                                    </label>
-
-                                    <select
-                                      value={currency}
-                                      onChange={(event) =>
-                                        setCurrency(
-                                          event.target
-                                            .value as CurrencyCode
-                                        )
-                                      }
-                                      className="sx-field w-full rounded-xl px-4 py-3 text-sm"
-                                    >
-                                      {currencies.map(
-                                        (item) => (
-                                          <option
-                                            key={item.code}
-                                            value={item.code}
-                                          >
-                                            {item.code} —{" "}
-                                            {item.name}
-                                          </option>
-                                        )
-                                      )}
-                                    </select>
-                                  </div>
-
-                                  <div>
-                                    <label className="mb-2 block font-mono text-xs sx-muted">
-                                      Language
-                                    </label>
-
-                                    <select
-                                      value={language}
-                                      onChange={(event) =>
-                                        setLanguage(
-                                          event.target.value
-                                        )
-                                      }
-                                      className="sx-field w-full rounded-xl px-4 py-3 text-sm"
-                                    >
-                                      <option value="English">
-                                        English
-                                      </option>
-                                      <option value="Hindi">
-                                        Hindi
-                                      </option>
-                                      <option value="Malayalam">
-                                        Malayalam
-                                      </option>
-                                      <option value="Tamil">
-                                        Tamil
-                                      </option>
-                                    </select>
-                                  </div>
-
-                                  <div className="sx-panel rounded-xl p-4">
-                                    <div className="flex items-center justify-between gap-4">
-                                      <div>
-                                        <p className="text-xs sx-muted">
-                                          Current currency
-                                        </p>
-
-                                        <p className="mt-1 font-mono text-lg font-bold sx-title">
-                                          {currency}
-                                        </p>
-                                      </div>
-
-                                      <span className="rounded-full border border-emerald-500/20 bg-emerald-500/10 px-3 py-1 text-xs font-semibold text-emerald-300">
-                                        Ready
-                                      </span>
-                                    </div>
-                                  </div>
-
-                                  <button
-                                    type="button"
-                                    onClick={
-                                      savePreferences
-                                    }
-                                    disabled={
-                                      savingPreferences
-                                    }
-                                    className="sx-primary-button flex items-center gap-2 rounded-xl px-5 py-3 text-sm font-bold transition-transform hover:-translate-y-0.5 disabled:cursor-not-allowed disabled:opacity-60"
-                                  >
-                                    {savingPreferences ? (
-                                      <>
-                                        <Loader2
-                                          size={16}
-                                          className="animate-spin"
-                                        />
-                                        Saving...
-                                      </>
-                                    ) : (
-                                      <>
-                                        <Check size={16} />
-                                        Save Localization
-                                      </>
-                                    )}
-                                  </button>
-                                </div>
-                              )}
-
-                              {/* APPEARANCE */}
-                              {item.id === "appearance" && (
-                                <div className="space-y-6">
-                                  <div>
-                                    <h2 className="font-mono text-xl font-bold sx-title">
-                                      Appearance
-                                    </h2>
-
-                                    <p className="mt-2 text-sm sx-muted">
-                                      Choose the workspace
-                                      theme that feels
-                                      best for your finance
-                                      review sessions.
-                                    </p>
-                                  </div>
-
-                                  <div className="sx-panel flex flex-col gap-5 rounded-xl p-5 sm:flex-row sm:items-center sm:justify-between">
-                                    <div className="flex min-w-0 items-center gap-4">
-                                      <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-xl border border-primary/20 bg-primary/10 text-primary">
-                                        {theme === "dark" ? (
-                                          <Moon size={20} />
-                                        ) : (
-                                          <Sun size={20} />
-                                        )}
-                                      </div>
-
-                                      <div className="min-w-0">
-                                        <h3 className="text-sm font-bold sx-title">
-                                          {theme === "dark"
-                                            ? "Dark Mode"
-                                            : "Light Mode"}
-                                        </h3>
-
-                                        <p className="mt-1 text-xs sx-muted">
-                                          Slider preference
-                                          is saved on this
-                                          device.
-                                        </p>
-                                      </div>
-                                    </div>
-
-                                    <div className="flex w-full justify-center sm:w-auto sm:justify-end">
-                                      <ThemeSlider />
-                                    </div>
-                                  </div>
                                 </div>
                               )}
                             </div>
-                          )}
-                        </div>
-                      );
-                    })}
+                          );
+                        }
+                      )}
+                    </div>
                   </div>
-                </div>
-              ))}
+                )
+              )}
             </div>
           )}
         </main>
 
         {/* 2FA ENROLLMENT MODAL */}
-        {enrollmentModalOpen && enrollmentData && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-md animate-in fade-in duration-200">
-            <div className="w-full max-w-md rounded-3xl border border-white/10 bg-[#0d1226] p-6 sm:p-7 shadow-2xl relative">
-              <div className="flex items-center justify-between gap-4 mb-5 pb-4 border-b border-white/10">
-                <div className="flex items-center gap-3">
-                  <div className="rounded-xl border border-emerald-500/20 bg-emerald-500/10 p-2.5 text-emerald-400">
-                    <ShieldCheck size={20} />
+        {enrollmentModalOpen &&
+          enrollmentData && (
+            <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-4 backdrop-blur-md animate-in fade-in duration-200">
+              <div className="relative w-full max-w-md rounded-3xl border border-white/10 bg-[#0d1226] p-6 shadow-2xl sm:p-7">
+                <div className="mb-5 flex items-center justify-between gap-4 border-b border-white/10 pb-4">
+                  <div className="flex items-center gap-3">
+                    <div className="rounded-xl border border-emerald-500/20 bg-emerald-500/10 p-2.5 text-emerald-400">
+                      <ShieldCheck
+                        size={20}
+                      />
+                    </div>
+
+                    <div>
+                      <h2 className="font-mono text-base font-bold text-white">
+                        Enable Two-Factor Authentication
+                      </h2>
+
+                      <p className="text-xs text-white/50">
+                        Step-by-step TOTP setup
+                      </p>
+                    </div>
                   </div>
-                  <div>
-                    <h2 className="text-base font-bold text-white font-mono">
-                      Enable Two-Factor Authentication
-                    </h2>
-                    <p className="text-xs text-white/50">
-                      Step-by-step TOTP setup
-                    </p>
-                  </div>
+
+                  <button
+                    type="button"
+                    onClick={
+                      cancelMfaEnrollment
+                    }
+                    className="rounded-xl p-2 text-white/40 transition hover:bg-white/10 hover:text-white"
+                  >
+                    <X size={18} />
+                  </button>
                 </div>
 
-                <button
-                  type="button"
-                  onClick={cancelMfaEnrollment}
-                  className="rounded-xl p-2 text-white/40 transition hover:bg-white/10 hover:text-white"
+                {enrollmentError && (
+                  <div className="mb-4 flex items-start gap-2.5 rounded-xl border border-red-500/30 bg-red-500/10 p-3 text-xs text-red-200">
+                    <ShieldAlert
+                      size={16}
+                      className="mt-0.5 shrink-0 text-red-400"
+                    />
+                    <span>
+                      {
+                        enrollmentError
+                      }
+                    </span>
+                  </div>
+                )}
+
+                <form
+                  onSubmit={
+                    handleVerifyMfaEnrollment
+                  }
+                  className="space-y-5"
                 >
-                  <X size={18} />
-                </button>
-              </div>
+                  {/* Step 1 */}
+                  <div>
+                    <div className="mb-2 flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-emerald-400">
+                      <QrCode
+                        size={14}
+                      />
+                      <span>
+                        Step 1: Scan with Authenticator App
+                      </span>
+                    </div>
 
-              {enrollmentError && (
-                <div className="mb-4 rounded-xl border border-red-500/30 bg-red-500/10 p-3 text-xs text-red-200 flex items-start gap-2.5">
-                  <ShieldAlert size={16} className="shrink-0 text-red-400 mt-0.5" />
-                  <span>{enrollmentError}</span>
-                </div>
-              )}
+                    <p className="mb-3 text-xs text-white/60">
+                      Open Google Authenticator, Authy, or 1Password and scan this QR code.
+                    </p>
 
-              <form onSubmit={handleVerifyMfaEnrollment} className="space-y-5">
-                {/* Step 1: Scan QR Code */}
-                <div>
-                  <div className="flex items-center gap-2 mb-2 text-xs font-semibold text-emerald-400 uppercase tracking-wider">
-                    <QrCode size={14} />
-                    <span>Step 1: Scan with Authenticator App</span>
+                    <div className="mx-auto flex w-fit justify-center rounded-2xl bg-white p-3.5 shadow-md">
+                      {/* eslint-disable-next-line @next/next/no-img-element */}
+                      <img
+                        src={
+                          enrollmentData.qrCode
+                        }
+                        alt="Two-Factor QR Code"
+                        className="h-44 w-44 object-contain"
+                      />
+                    </div>
                   </div>
 
-                  <p className="text-xs text-white/60 mb-3">
-                    Open Google Authenticator, Authy, or 1Password and scan this QR code.
-                  </p>
+                  {/* Manual Key */}
+                  <div className="rounded-xl border border-white/10 bg-white/[0.04] p-3 text-xs">
+                    <div className="mb-1.5 flex items-center justify-between">
+                      <span className="flex items-center gap-1.5 font-medium text-white/60">
+                        <KeyRound
+                          size={13}
+                        />
+                        Manual setup secret:
+                      </span>
 
-                  <div className="flex justify-center p-3.5 bg-white rounded-2xl mx-auto w-fit shadow-md">
-                    {/* eslint-disable-next-line @next/next/no-img-element */}
-                    <img
-                      src={enrollmentData.qrCode}
-                      alt="Two-Factor QR Code"
-                      className="h-44 w-44 object-contain"
+                      <button
+                        type="button"
+                        onClick={
+                          copySecretToClipboard
+                        }
+                        className="flex items-center gap-1 text-xs font-semibold text-emerald-400 transition hover:text-emerald-300"
+                      >
+                        {copiedSecret ? (
+                          <>
+                            <Check
+                              size={12}
+                            />
+                            <span>
+                              Copied!
+                            </span>
+                          </>
+                        ) : (
+                          <>
+                            <Copy
+                              size={12}
+                            />
+                            <span>
+                              Copy Key
+                            </span>
+                          </>
+                        )}
+                      </button>
+                    </div>
+
+                    <div className="break-all rounded-lg border border-white/5 bg-black/40 px-2.5 py-1.5 font-mono text-[11px] tracking-wider text-white/90 select-all">
+                      {
+                        enrollmentData.secret
+                      }
+                    </div>
+                  </div>
+
+                  {/* Step 2 */}
+                  <div>
+                    <div className="mb-1.5 flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-emerald-400">
+                      <Check
+                        size={14}
+                      />
+                      <span>
+                        Step 2: Enter 6-Digit Code
+                      </span>
+                    </div>
+
+                    <p className="mb-2.5 text-xs text-white/60">
+                      Enter the code currently displayed in your authenticator app to confirm setup.
+                    </p>
+
+                    <input
+                      type="text"
+                      inputMode="numeric"
+                      autoComplete="one-time-code"
+                      maxLength={6}
+                      placeholder="000000"
+                      value={
+                        enrollmentCode
+                      }
+                      onChange={(e) => {
+                        setEnrollmentCode(
+                          e.target.value
+                            .replace(
+                              /\D/g,
+                              ""
+                            )
+                            .slice(
+                              0,
+                              6
+                            )
+                        );
+
+                        setEnrollmentError(
+                          ""
+                        );
+                      }}
+                      disabled={
+                        mfaBusy
+                      }
+                      className="w-full rounded-xl border border-white/15 bg-white/[0.08] px-4 py-3 text-center font-mono text-2xl font-bold tracking-[0.4em] text-white outline-none transition focus:border-emerald-400 focus:bg-white/[0.12]"
                     />
                   </div>
-                </div>
 
-                {/* Manual Key Fallback */}
-                <div className="rounded-xl border border-white/10 bg-white/[0.04] p-3 text-xs">
-                  <div className="flex items-center justify-between mb-1.5">
-                    <span className="text-white/60 flex items-center gap-1.5 font-medium">
-                      <KeyRound size={13} />
-                      Manual setup secret:
-                    </span>
+                  {/* Actions */}
+                  <div className="flex items-center gap-3 pt-2">
                     <button
                       type="button"
-                      onClick={copySecretToClipboard}
-                      className="text-xs text-emerald-400 hover:text-emerald-300 font-semibold flex items-center gap-1 transition"
+                      onClick={
+                        cancelMfaEnrollment
+                      }
+                      disabled={
+                        mfaBusy
+                      }
+                      className="flex-1 rounded-xl border border-white/10 bg-white/[0.04] py-3 text-sm font-semibold text-white/70 transition hover:bg-white/[0.08] hover:text-white disabled:opacity-50"
                     >
-                      {copiedSecret ? (
+                      Cancel
+                    </button>
+
+                    <button
+                      type="submit"
+                      disabled={
+                        mfaBusy ||
+                        enrollmentCode.trim()
+                          .length !== 6
+                      }
+                      className="flex flex-1 items-center justify-center gap-2 rounded-xl bg-emerald-500 py-3 text-sm font-semibold text-black shadow-lg shadow-emerald-500/20 transition hover:bg-emerald-400 disabled:cursor-not-allowed disabled:opacity-60"
+                    >
+                      {mfaBusy ? (
                         <>
-                          <Check size={12} />
-                          <span>Copied!</span>
+                          <Loader2
+                            size={16}
+                            className="animate-spin"
+                          />
+
+                          <span>
+                            Verifying...
+                          </span>
                         </>
                       ) : (
-                        <>
-                          <Copy size={12} />
-                          <span>Copy Key</span>
-                        </>
+                        <span>
+                          Verify & Activate
+                        </span>
                       )}
                     </button>
                   </div>
-                  <div className="font-mono text-[11px] text-white/90 break-all select-all tracking-wider bg-black/40 px-2.5 py-1.5 rounded-lg border border-white/5">
-                    {enrollmentData.secret}
-                  </div>
-                </div>
+                </form>
+              </div>
+            </div>
+          )}
 
-                {/* Step 2: Verification Code */}
-                <div>
-                  <div className="flex items-center gap-2 mb-1.5 text-xs font-semibold text-emerald-400 uppercase tracking-wider">
-                    <Check size={14} />
-                    <span>Step 2: Enter 6-Digit Code</span>
-                  </div>
-
-                  <p className="text-xs text-white/60 mb-2.5">
-                    Enter the code currently displayed in your authenticator app to confirm setup.
-                  </p>
-
-                  <input
-                    type="text"
-                    inputMode="numeric"
-                    autoComplete="one-time-code"
-                    maxLength={6}
-                    placeholder="000000"
-                    value={enrollmentCode}
-                    onChange={(e) => {
-                      setEnrollmentCode(e.target.value.replace(/\D/g, "").slice(0, 6));
-                      setEnrollmentError("");
-                    }}
-                    disabled={mfaBusy}
-                    className="w-full text-center tracking-[0.4em] font-mono text-2xl font-bold py-3 px-4 rounded-xl border border-white/15 bg-white/[0.08] text-white focus:border-emerald-400 focus:bg-white/[0.12] outline-none transition"
+        {/* 2FA DISABLE MODAL */}
+        {disableModalOpen && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-4 backdrop-blur-md animate-in fade-in duration-200">
+            <div className="relative w-full max-w-md rounded-3xl border border-white/10 bg-[#0d1226] p-6 shadow-2xl sm:p-7">
+              <div className="mb-4 flex items-start gap-4">
+                <div className="shrink-0 rounded-xl border border-red-500/20 bg-red-500/10 p-2.5 text-red-400">
+                  <ShieldAlert
+                    size={22}
                   />
                 </div>
 
-                {/* Actions */}
-                <div className="flex items-center gap-3 pt-2">
-                  <button
-                    type="button"
-                    onClick={cancelMfaEnrollment}
-                    disabled={mfaBusy}
-                    className="flex-1 rounded-xl border border-white/10 bg-white/[0.04] py-3 text-sm font-semibold text-white/70 hover:bg-white/[0.08] hover:text-white transition disabled:opacity-50"
-                  >
-                    Cancel
-                  </button>
-
-                  <button
-                    type="submit"
-                    disabled={mfaBusy || enrollmentCode.trim().length !== 6}
-                    className="flex-1 flex items-center justify-center gap-2 rounded-xl bg-emerald-500 py-3 text-sm font-semibold text-black transition hover:bg-emerald-400 disabled:cursor-not-allowed disabled:opacity-60 shadow-lg shadow-emerald-500/20"
-                  >
-                    {mfaBusy ? (
-                      <>
-                        <Loader2 size={16} className="animate-spin" />
-                        <span>Verifying...</span>
-                      </>
-                    ) : (
-                      <span>Verify & Activate</span>
-                    )}
-                  </button>
-                </div>
-              </form>
-            </div>
-          </div>
-        )}
-
-        {/* 2FA DISABLE CONFIRMATION MODAL */}
-        {disableModalOpen && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-md animate-in fade-in duration-200">
-            <div className="w-full max-w-md rounded-3xl border border-white/10 bg-[#0d1226] p-6 sm:p-7 shadow-2xl relative">
-              <div className="flex items-start gap-4 mb-4">
-                <div className="rounded-xl border border-red-500/20 bg-red-500/10 p-2.5 text-red-400 shrink-0">
-                  <ShieldAlert size={22} />
-                </div>
                 <div>
-                  <h2 className="text-base font-bold text-white font-mono">
+                  <h2 className="font-mono text-base font-bold text-white">
                     Disable Two-Factor Authentication?
                   </h2>
-                  <p className="mt-1 text-xs text-white/60 leading-relaxed">
+
+                  <p className="mt-1 text-xs leading-relaxed text-white/60">
                     This will remove the extra layer of security from your SpendX account. You will only require your email and password to log in.
                   </p>
                 </div>
@@ -2249,33 +3331,53 @@ export default function Settings() {
 
               {disableError && (
                 <div className="mb-4 rounded-xl border border-red-500/30 bg-red-500/10 p-3 text-xs text-red-200">
-                  {disableError}
+                  {
+                    disableError
+                  }
                 </div>
               )}
 
               <div className="flex items-center gap-3 pt-3">
                 <button
                   type="button"
-                  onClick={() => setDisableModalOpen(false)}
-                  disabled={mfaBusy}
-                  className="flex-1 rounded-xl border border-white/10 bg-white/[0.04] py-3 text-sm font-semibold text-white/70 hover:bg-white/[0.08] hover:text-white transition disabled:opacity-50"
+                  onClick={() =>
+                    setDisableModalOpen(
+                      false
+                    )
+                  }
+                  disabled={
+                    mfaBusy
+                  }
+                  className="flex-1 rounded-xl border border-white/10 bg-white/[0.04] py-3 text-sm font-semibold text-white/70 transition hover:bg-white/[0.08] hover:text-white disabled:opacity-50"
                 >
                   Keep 2FA Enabled
                 </button>
 
                 <button
                   type="button"
-                  onClick={handleConfirmDisable2FA}
-                  disabled={mfaBusy}
-                  className="flex-1 flex items-center justify-center gap-2 rounded-xl bg-red-500 py-3 text-sm font-semibold text-white transition hover:bg-red-600 disabled:opacity-60 shadow-lg shadow-red-500/20"
+                  onClick={
+                    handleConfirmDisable2FA
+                  }
+                  disabled={
+                    mfaBusy
+                  }
+                  className="flex flex-1 items-center justify-center gap-2 rounded-xl bg-red-500 py-3 text-sm font-semibold text-white shadow-lg shadow-red-500/20 transition hover:bg-red-600 disabled:opacity-60"
                 >
                   {mfaBusy ? (
                     <>
-                      <Loader2 size={16} className="animate-spin" />
-                      <span>Disabling...</span>
+                      <Loader2
+                        size={16}
+                        className="animate-spin"
+                      />
+
+                      <span>
+                        Disabling...
+                      </span>
                     </>
                   ) : (
-                    <span>Disable 2FA</span>
+                    <span>
+                      Disable 2FA
+                    </span>
                   )}
                 </button>
               </div>

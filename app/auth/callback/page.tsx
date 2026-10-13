@@ -38,8 +38,47 @@ export default function AuthCallbackPage() {
 
         async function handleAuthCallback() {
             try {
-                // Supabase automatically detects the access_token/refresh_token
-                // from the URL hash and restores the session in the browser.
+                const currentUrl = new URL(window.location.href);
+
+                /*
+                 * Native Android OAuth:
+                 *
+                 * Google/Supabase returns:
+                 * com.spendx.app://auth/callback?code=...
+                 *
+                 * Exchange the authorization code for a Supabase session.
+                 */
+                const code = currentUrl.searchParams.get("code");
+
+                if (code) {
+                    const { error: exchangeError } =
+                        await supabase.auth.exchangeCodeForSession(code);
+
+                    if (exchangeError) {
+                        console.error(
+                            "OAuth code exchange error:",
+                            exchangeError
+                        );
+
+                        if (isMounted) {
+                            setError(
+                                "Unable to complete Google sign-in. Please try again."
+                            );
+                        }
+
+                        return;
+                    }
+
+                    await proceedWithRedirect();
+                    return;
+                }
+
+                /*
+                 * Web OAuth fallback:
+                 *
+                 * Supabase may already have restored the session from
+                 * the OAuth callback URL.
+                 */
                 const {
                     data: { session },
                     error: sessionError,
@@ -60,26 +99,36 @@ export default function AuthCallbackPage() {
                     return;
                 }
 
-                // Wait for Supabase to finish processing the OAuth URL.
+                /*
+                 * Wait for Supabase to finish processing the OAuth URL.
+                 */
                 const {
                     data: { subscription },
-                } = supabase.auth.onAuthStateChange(async (event, newSession) => {
-                    if (
-                        (event === "SIGNED_IN" || event === "INITIAL_SESSION") &&
-                        newSession
-                    ) {
-                        await proceedWithRedirect();
+                } = supabase.auth.onAuthStateChange(
+                    async (event, newSession) => {
+                        if (
+                            (event === "SIGNED_IN" ||
+                                event === "INITIAL_SESSION") &&
+                            newSession
+                        ) {
+                            await proceedWithRedirect();
+                        }
                     }
-                });
+                );
 
                 return () => {
                     subscription.unsubscribe();
                 };
-            } catch (error) {
-                console.error("OAuth callback error:", error);
+            } catch (callbackError) {
+                console.error(
+                    "OAuth callback error:",
+                    callbackError
+                );
 
                 if (isMounted) {
-                    setError("Something went wrong during Google sign-in.");
+                    setError(
+                        "Something went wrong during Google sign-in."
+                    );
                 }
             }
         }
@@ -101,7 +150,9 @@ export default function AuthCallbackPage() {
         return (
             <main className="min-h-screen bg-[#050816] text-white flex items-center justify-center px-4">
                 <div className="w-full max-w-md rounded-3xl border border-white/10 bg-white/[0.06] p-8 text-center shadow-2xl backdrop-blur-xl">
-                    <h1 className="text-xl font-semibold">Sign-in failed</h1>
+                    <h1 className="text-xl font-semibold">
+                        Sign-in failed
+                    </h1>
 
                     <p className="mt-3 text-sm text-white/60">
                         {error}
