@@ -6,6 +6,9 @@ import LiquidGlassNavbar from "@/components/ui/liquidglassnavbar";
 import { supabase } from "@/lib/supabase";
 import { formatCurrency } from "@/lib/formatCurrency";
 import type { CurrencyCode } from "@/lib/currencies";
+import { sendNotification } from "@/lib/notifications";
+import { sendEmailNotification } from "@/lib/emailNotifications";
+import { checkRecurringPaymentNotifications } from "@/lib/recurringNotifications";
 import { useEffect, useMemo, useState } from "react";
 import {
   Wallet,
@@ -78,31 +81,305 @@ function isSameMonth(date: Date, target: Date) {
 }
 
 function getPreviousMonth(date: Date) {
-  return new Date(date.getFullYear(), date.getMonth() - 1, 1);
+  return new Date(
+    date.getFullYear(),
+    date.getMonth() - 1,
+    1
+  );
 }
 
 function getDaysInMonth(date: Date) {
-  return new Date(date.getFullYear(), date.getMonth() + 1, 0).getDate();
+  return new Date(
+    date.getFullYear(),
+    date.getMonth() + 1,
+    0
+  ).getDate();
 }
 
 function getSafeCategory(category?: string | null) {
-  if (!category || category.trim() === "") return "Uncategorized";
+  if (!category || category.trim() === "") {
+    return "Uncategorized";
+  }
 
   return category.trim();
 }
 
 export default function DashboardPage() {
-  const [displayName, setDisplayName] = useState("User");
-  const [transactions, setTransactions] = useState<Transaction[]>([]);
-  const [currency, setCurrency] = useState<CurrencyCode>("INR");
+  const [displayName, setDisplayName] =
+    useState("User");
+
+  const [transactions, setTransactions] =
+    useState<Transaction[]>([]);
+
+  const [currency, setCurrency] =
+    useState<CurrencyCode>("INR");
 
   // Monthly spending limit
-  const [monthlyLimit, setMonthlyLimit] = useState<number | null>(null);
+  const [monthlyLimit, setMonthlyLimit] =
+    useState<number | null>(null);
 
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] =
+    useState(true);
+
   const [dashboardStatus, setDashboardStatus] =
     useState<SpendXStatusType>("loading");
 
+  /*
+   * =========================================================
+   * BUDGET NOTIFICATION
+   * =========================================================
+   *
+   * Sends notifications when the user reaches:
+   *
+   * 70%  -> Approaching budget
+   * 90%  -> Critical budget
+   * 100% -> Budget exceeded
+   *
+   * Push Alerts and Email Alerts work independently.
+   *
+   * Push ON + Email ON  -> Push + Email
+   * Push ON + Email OFF -> Push only
+   * Push OFF + Email ON -> Email only
+   * Push OFF + Email OFF -> Nothing
+   *
+   * Each notification channel and threshold is only sent
+   * once per month.
+   */
+  async function checkBudgetNotification(
+    expenses: number,
+    limit: number | null,
+    percentage: number
+  ) {
+    if (!limit || limit <= 0) {
+      return;
+    }
+
+    /*
+     * Read notification preferences.
+     */
+    const savedSettings =
+      localStorage.getItem(
+        "spendx-settings"
+      );
+
+    if (!savedSettings) {
+      return;
+    }
+
+    let pushAlertsEnabled = false;
+    let emailAlertsEnabled = false;
+
+    try {
+      const parsedSettings =
+        JSON.parse(savedSettings);
+
+      pushAlertsEnabled =
+        parsedSettings.pushAlerts === true;
+
+      emailAlertsEnabled =
+        parsedSettings.emailAlerts === true;
+    } catch (error) {
+      console.error(
+        "Could not read SpendX notification settings:",
+        error
+      );
+
+      return;
+    }
+
+    /*
+     * If both notification channels are disabled,
+     * there is nothing to send.
+     */
+    if (
+      !pushAlertsEnabled &&
+      !emailAlertsEnabled
+    ) {
+      return;
+    }
+
+    const now = new Date();
+
+    /*
+     * Create a unique key for the current month.
+     *
+     * Example:
+     * 2026-09
+     */
+    const monthKey =
+      `${now.getFullYear()}-${String(
+        now.getMonth() + 1
+      ).padStart(2, "0")}`;
+
+    let threshold:
+      | 70
+      | 90
+      | 100
+      | null = null;
+
+    let title = "";
+    let body = "";
+
+    /*
+     * Always check the highest threshold first.
+     */
+    if (percentage >= 100) {
+      threshold = 100;
+
+      title =
+        "Monthly Budget Exceeded";
+
+      body =
+        `You have exceeded your monthly spending limit. ` +
+        `You have spent ${formatCurrency(
+          expenses,
+          currency
+        )} against your limit of ${formatCurrency(
+          limit,
+          currency
+        )}.`;
+    } else if (percentage >= 90) {
+      threshold = 90;
+
+      title =
+        "Critical Budget Alert";
+
+      body =
+        `You have used ${percentage.toFixed(
+          0
+        )}% of your monthly spending limit. ` +
+        `Only ${formatCurrency(
+          Math.max(
+            limit - expenses,
+            0
+          ),
+          currency
+        )} remains.`;
+    } else if (percentage >= 70) {
+      threshold = 70;
+
+      title = "Budget Alert";
+
+      body =
+        `You have used ${percentage.toFixed(
+          0
+        )}% of your monthly spending limit. ` +
+        `${formatCurrency(
+          Math.max(
+            limit - expenses,
+            0
+          ),
+          currency
+        )} remains.`;
+    }
+
+    /*
+     * Nothing to notify if the user is below 70%.
+     */
+    if (threshold === null) {
+      return;
+    }
+
+    /*
+     * =========================================================
+     * PUSH NOTIFICATION
+     * =========================================================
+     *
+     * Push has its own localStorage key so that a successful
+     * push notification does not prevent the email from being
+     * sent.
+     */
+    if (pushAlertsEnabled) {
+      const pushNotificationKey =
+        `spendx-budget-notification-${monthKey}-${threshold}-push`;
+
+      if (
+        localStorage.getItem(
+          pushNotificationKey
+        ) !== "sent"
+      ) {
+        const notificationId =
+          threshold === 70
+            ? 701
+            : threshold === 90
+              ? 901
+              : 1001;
+
+        try {
+          const sent =
+            await sendNotification(
+              title,
+              body,
+              notificationId
+            );
+
+          /*
+           * Only mark the push notification as sent
+           * if it was actually created.
+           */
+          if (sent) {
+            localStorage.setItem(
+              pushNotificationKey,
+              "sent"
+            );
+          }
+        } catch (error) {
+          console.error(
+            "Budget push notification error:",
+            error
+          );
+        }
+      }
+    }
+
+    /*
+     * =========================================================
+     * EMAIL NOTIFICATION
+     * =========================================================
+     *
+     * Email has a separate localStorage key.
+     */
+    if (emailAlertsEnabled) {
+      const emailNotificationKey =
+        `spendx-budget-notification-${monthKey}-${threshold}-email`;
+
+      if (
+        localStorage.getItem(
+          emailNotificationKey
+        ) !== "sent"
+      ) {
+        try {
+          const sent =
+            await sendEmailNotification({
+              type: "budget",
+              message: body,
+            });
+
+          /*
+           * Only mark the email as sent if the
+           * API successfully sent it.
+           */
+          if (sent) {
+            localStorage.setItem(
+              emailNotificationKey,
+              "sent"
+            );
+          }
+        } catch (error) {
+          console.error(
+            "Budget email notification error:",
+            error
+          );
+        }
+      }
+    }
+  }
+
+  /*
+   * =========================================================
+   * ONLINE / OFFLINE STATUS
+   * =========================================================
+   */
   useEffect(() => {
     const handleOnline = () => {
       loadDashboardData();
@@ -112,15 +389,34 @@ export default function DashboardPage() {
       setDashboardStatus("offline");
     };
 
-    window.addEventListener("online", handleOnline);
-    window.addEventListener("offline", handleOffline);
+    window.addEventListener(
+      "online",
+      handleOnline
+    );
+
+    window.addEventListener(
+      "offline",
+      handleOffline
+    );
 
     return () => {
-      window.removeEventListener("online", handleOnline);
-      window.removeEventListener("offline", handleOffline);
+      window.removeEventListener(
+        "online",
+        handleOnline
+      );
+
+      window.removeEventListener(
+        "offline",
+        handleOffline
+      );
     };
   }, []);
 
+  /*
+   * =========================================================
+   * LOAD DASHBOARD DATA
+   * =========================================================
+   */
   async function loadDashboardData() {
     try {
       setLoading(true);
@@ -135,7 +431,8 @@ export default function DashboardPage() {
       const {
         data: { user },
         error: userError,
-      } = await supabase.auth.getUser();
+      } =
+        await supabase.auth.getUser();
 
       if (userError || !user) {
         setDashboardStatus("session");
@@ -143,31 +440,44 @@ export default function DashboardPage() {
         return;
       }
 
-      // Load user's currency
-      const { data: profileSettings, error: profileError } =
-        await supabase
-          .from("profiles")
-          .select("currency")
-          .eq("id", user.id)
-          .maybeSingle();
+      /*
+       * Load user's currency.
+       */
+      const {
+        data: profileSettings,
+        error: profileError,
+      } = await supabase
+        .from("profiles")
+        .select("currency")
+        .eq("id", user.id)
+        .maybeSingle();
 
       if (profileError) {
-        console.error("Dashboard currency error:", profileError);
+        console.error(
+          "Dashboard currency error:",
+          profileError
+        );
       } else {
         setCurrency(
-          (profileSettings?.currency as CurrencyCode) || "INR"
+          (profileSettings?.currency as CurrencyCode) ||
+          "INR"
         );
       }
 
-      // Load user's monthly spending limit
+      /*
+       * Load user's monthly spending limit.
+       */
       const {
         data: spendingLimitSettings,
         error: spendingLimitError,
-      } = await supabase
-        .from("monthly_spending_limits")
-        .select("monthly_limit")
-        .eq("user_id", user.id)
-        .maybeSingle();
+      } =
+        await supabase
+          .from(
+            "monthly_spending_limits"
+          )
+          .select("monthly_limit")
+          .eq("user_id", user.id)
+          .maybeSingle();
 
       if (spendingLimitError) {
         console.error(
@@ -178,8 +488,11 @@ export default function DashboardPage() {
         setMonthlyLimit(null);
       } else {
         setMonthlyLimit(
-          spendingLimitSettings?.monthly_limit != null
-            ? Number(spendingLimitSettings.monthly_limit)
+          spendingLimitSettings?.monthly_limit !=
+            null
+            ? Number(
+              spendingLimitSettings.monthly_limit
+            )
             : null
         );
       }
@@ -192,31 +505,55 @@ export default function DashboardPage() {
 
       setDisplayName(name);
 
-      // Load transactions
-      const { data, error } = await supabase
+      /*
+       * Load transactions.
+       */
+      const {
+        data,
+        error,
+      } = await supabase
         .from("transactions")
         .select("*")
         .eq("user_id", user.id)
-        .order("transaction_date", { ascending: false });
+        .order(
+          "transaction_date",
+          {
+            ascending: false,
+          }
+        );
 
       if (error) {
-        console.error("Dashboard transactions error:", error);
+        console.error(
+          "Dashboard transactions error:",
+          error
+        );
+
         setDashboardStatus("database");
         setTransactions([]);
+
         return;
       }
 
-      const fetchedTransactions = (data || []) as Transaction[];
+      const fetchedTransactions =
+        (data || []) as Transaction[];
 
-      setTransactions(fetchedTransactions);
+      setTransactions(
+        fetchedTransactions
+      );
 
-      if (fetchedTransactions.length === 0) {
+      if (
+        fetchedTransactions.length === 0
+      ) {
         setDashboardStatus("empty");
       } else {
         setDashboardStatus("active");
       }
     } catch (error) {
-      console.error("Dashboard load error:", error);
+      console.error(
+        "Dashboard load error:",
+        error
+      );
+
       setDashboardStatus("database");
       setTransactions([]);
     } finally {
@@ -228,183 +565,319 @@ export default function DashboardPage() {
     loadDashboardData();
   }, []);
 
+  /*
+   * =========================================================
+   * DASHBOARD CALCULATIONS
+   * =========================================================
+   */
   const dashboardData = useMemo(() => {
     const today = new Date();
-    const previousMonth = getPreviousMonth(today);
-    const daysInCurrentMonth = getDaysInMonth(today);
-    const currentDayOfMonth = today.getDate();
 
-    const currentMonthTransactions = transactions.filter((transaction) => {
-      const date = parseTransactionDate(
-        transaction.transaction_date || transaction.created_at
+    const previousMonth =
+      getPreviousMonth(today);
+
+    const daysInCurrentMonth =
+      getDaysInMonth(today);
+
+    const currentDayOfMonth =
+      today.getDate();
+
+    const currentMonthTransactions =
+      transactions.filter(
+        (transaction) => {
+          const date =
+            parseTransactionDate(
+              transaction.transaction_date ||
+              transaction.created_at
+            );
+
+          return (
+            !Number.isNaN(
+              date.getTime()
+            ) &&
+            isSameMonth(
+              date,
+              today
+            )
+          );
+        }
       );
 
-      return (
-        !Number.isNaN(date.getTime()) &&
-        isSameMonth(date, today)
-      );
-    });
+    const previousMonthTransactions =
+      transactions.filter(
+        (transaction) => {
+          const date =
+            parseTransactionDate(
+              transaction.transaction_date ||
+              transaction.created_at
+            );
 
-    const previousMonthTransactions = transactions.filter((transaction) => {
-      const date = parseTransactionDate(
-        transaction.transaction_date || transaction.created_at
-      );
-
-      return (
-        !Number.isNaN(date.getTime()) &&
-        isSameMonth(date, previousMonth)
-      );
-    });
-
-    const currentMonthIncome = currentMonthTransactions
-      .filter((transaction) => transaction.type === "income")
-      .reduce(
-        (sum, transaction) =>
-          sum + Number(transaction.amount || 0),
-        0
+          return (
+            !Number.isNaN(
+              date.getTime()
+            ) &&
+            isSameMonth(
+              date,
+              previousMonth
+            )
+          );
+        }
       );
 
-    const currentMonthExpenses = currentMonthTransactions
-      .filter((transaction) => transaction.type === "expense")
-      .reduce(
-        (sum, transaction) =>
-          sum + Number(transaction.amount || 0),
-        0
-      );
+    const currentMonthIncome =
+      currentMonthTransactions
+        .filter(
+          (transaction) =>
+            transaction.type ===
+            "income"
+        )
+        .reduce(
+          (sum, transaction) =>
+            sum +
+            Number(
+              transaction.amount || 0
+            ),
+          0
+        );
 
-    const previousMonthIncome = previousMonthTransactions
-      .filter((transaction) => transaction.type === "income")
-      .reduce(
-        (sum, transaction) =>
-          sum + Number(transaction.amount || 0),
-        0
-      );
+    const currentMonthExpenses =
+      currentMonthTransactions
+        .filter(
+          (transaction) =>
+            transaction.type ===
+            "expense"
+        )
+        .reduce(
+          (sum, transaction) =>
+            sum +
+            Number(
+              transaction.amount || 0
+            ),
+          0
+        );
 
-    const previousMonthExpenses = previousMonthTransactions
-      .filter((transaction) => transaction.type === "expense")
-      .reduce(
-        (sum, transaction) =>
-          sum + Number(transaction.amount || 0),
-        0
-      );
+    const previousMonthIncome =
+      previousMonthTransactions
+        .filter(
+          (transaction) =>
+            transaction.type ===
+            "income"
+        )
+        .reduce(
+          (sum, transaction) =>
+            sum +
+            Number(
+              transaction.amount || 0
+            ),
+          0
+        );
+
+    const previousMonthExpenses =
+      previousMonthTransactions
+        .filter(
+          (transaction) =>
+            transaction.type ===
+            "expense"
+        )
+        .reduce(
+          (sum, transaction) =>
+            sum +
+            Number(
+              transaction.amount || 0
+            ),
+          0
+        );
 
     const currentMonthSavings =
-      currentMonthIncome - currentMonthExpenses;
+      currentMonthIncome -
+      currentMonthExpenses;
 
-    // =========================================================
-    // MONTHLY SPENDING LIMIT
-    // =========================================================
+    /*
+     * =========================================================
+     * MONTHLY SPENDING LIMIT
+     * =========================================================
+     */
 
     const spendingLimitPercentage =
-      monthlyLimit !== null && monthlyLimit > 0
-        ? (currentMonthExpenses / monthlyLimit) * 100
+      monthlyLimit !== null &&
+        monthlyLimit > 0
+        ? (currentMonthExpenses /
+          monthlyLimit) *
+        100
         : 0;
 
-    // Progress bar cannot visually exceed 100%
-    const spendingLimitProgress = Math.min(
-      spendingLimitPercentage,
-      100
-    );
+    const spendingLimitProgress =
+      Math.min(
+        spendingLimitPercentage,
+        100
+      );
 
     const remainingSpendingLimit =
       monthlyLimit !== null
-        ? monthlyLimit - currentMonthExpenses
+        ? monthlyLimit -
+        currentMonthExpenses
         : null;
 
-    // 100% or more
     const spendingLimitExceeded =
       monthlyLimit !== null &&
-      currentMonthExpenses >= monthlyLimit;
+      currentMonthExpenses >=
+      monthlyLimit;
 
-    // 90% - 99%
     const spendingLimitCritical =
       monthlyLimit !== null &&
-      currentMonthExpenses >= monthlyLimit * 0.9 &&
-      currentMonthExpenses < monthlyLimit;
+      currentMonthExpenses >=
+      monthlyLimit * 0.9 &&
+      currentMonthExpenses <
+      monthlyLimit;
 
-    // 70% - 89%
     const spendingLimitApproaching =
       monthlyLimit !== null &&
-      currentMonthExpenses >= monthlyLimit * 0.7 &&
-      currentMonthExpenses < monthlyLimit * 0.9;
+      currentMonthExpenses >=
+      monthlyLimit * 0.7 &&
+      currentMonthExpenses <
+      monthlyLimit * 0.9;
 
-    // 0% - 69%
     const spendingLimitSafe =
       monthlyLimit !== null &&
-      currentMonthExpenses < monthlyLimit * 0.7;
+      currentMonthExpenses <
+      monthlyLimit * 0.7;
 
-    const categoryTotals: Record<string, number> = {};
+    /*
+     * =========================================================
+     * CATEGORY TOTALS
+     * =========================================================
+     */
+
+    const categoryTotals: Record<
+      string,
+      number
+    > = {};
 
     currentMonthTransactions
-      .filter((transaction) => transaction.type === "expense")
+      .filter(
+        (transaction) =>
+          transaction.type ===
+          "expense"
+      )
       .forEach((transaction) => {
-        const category = getSafeCategory(transaction.category);
-        const amount = Number(transaction.amount || 0);
+        const category =
+          getSafeCategory(
+            transaction.category
+          );
+
+        const amount = Number(
+          transaction.amount || 0
+        );
 
         categoryTotals[category] =
-          (categoryTotals[category] || 0) + amount;
+          (categoryTotals[
+            category
+          ] || 0) + amount;
       });
 
-    const categoryEntries = Object.entries(categoryTotals).sort(
-      (a, b) => b[1] - a[1]
-    );
+    const categoryEntries =
+      Object.entries(
+        categoryTotals
+      ).sort(
+        (a, b) => b[1] - a[1]
+      );
 
     const highestCategory =
-      categoryEntries[0]?.[0] || "No expenses yet";
+      categoryEntries[0]?.[0] ||
+      "No expenses yet";
 
     const highestCategoryAmount =
       categoryEntries[0]?.[1] || 0;
 
+    /*
+     * =========================================================
+     * PROJECTIONS
+     * =========================================================
+     */
+
     const dailyAverageExpense =
       currentDayOfMonth > 0
-        ? currentMonthExpenses / currentDayOfMonth
+        ? currentMonthExpenses /
+        currentDayOfMonth
         : 0;
 
     const projectedMonthlyExpense =
-      dailyAverageExpense * daysInCurrentMonth;
+      dailyAverageExpense *
+      daysInCurrentMonth;
 
     const expenseChangePercent =
       previousMonthExpenses > 0
-        ? ((currentMonthExpenses - previousMonthExpenses) /
+        ? ((currentMonthExpenses -
+          previousMonthExpenses) /
           previousMonthExpenses) *
         100
         : null;
 
     const incomeChangePercent =
       previousMonthIncome > 0
-        ? ((currentMonthIncome - previousMonthIncome) /
+        ? ((currentMonthIncome -
+          previousMonthIncome) /
           previousMonthIncome) *
         100
         : null;
 
-    const recentTransactions = [...transactions]
-      .sort((a, b) => {
-        const dateA = parseTransactionDate(
-          a.transaction_date || a.created_at
-        );
+    /*
+     * =========================================================
+     * RECENT TRANSACTIONS
+     * =========================================================
+     */
 
-        const dateB = parseTransactionDate(
-          b.transaction_date || b.created_at
-        );
+    const recentTransactions =
+      [...transactions]
+        .sort((a, b) => {
+          const dateA =
+            parseTransactionDate(
+              a.transaction_date ||
+              a.created_at
+            );
 
-        return dateB.getTime() - dateA.getTime();
-      })
-      .slice(0, 4);
+          const dateB =
+            parseTransactionDate(
+              b.transaction_date ||
+              b.created_at
+            );
+
+          return (
+            dateB.getTime() -
+            dateA.getTime()
+          );
+        })
+        .slice(0, 4);
+
+    /*
+     * =========================================================
+     * SMART INSIGHTS
+     * =========================================================
+     */
 
     const insights: {
-      icon: "brain" | "target" | "calendar" | "sparkles";
+      icon:
+      | "brain"
+      | "target"
+      | "calendar"
+      | "sparkles";
       title: string;
       value: string;
       description: string;
     }[] = [];
 
-    if (expenseChangePercent !== null) {
+    if (
+      expenseChangePercent !== null
+    ) {
       const roundedChange =
-        Math.abs(expenseChangePercent).toFixed(0);
+        Math.abs(
+          expenseChangePercent
+        ).toFixed(0);
 
       insights.push({
         icon: "brain",
-        title: "Monthly Spend Trend",
+        title:
+          "Monthly Spend Trend",
         value:
           expenseChangePercent > 0
             ? `${roundedChange}% higher`
@@ -417,8 +890,10 @@ export default function DashboardPage() {
     } else {
       insights.push({
         icon: "brain",
-        title: "Monthly Spend Trend",
-        value: "Tracking started",
+        title:
+          "Monthly Spend Trend",
+        value:
+          "Tracking started",
         description:
           "Add last month’s transactions to compare spending trends.",
       });
@@ -426,8 +901,10 @@ export default function DashboardPage() {
 
     insights.push({
       icon: "target",
-      title: "Biggest Expense",
-      value: highestCategory,
+      title:
+        "Biggest Expense",
+      value:
+        highestCategory,
       description:
         highestCategoryAmount > 0
           ? `${formatCurrency(
@@ -439,11 +916,13 @@ export default function DashboardPage() {
 
     insights.push({
       icon: "calendar",
-      title: "Projected Expense",
-      value: formatCurrency(
-        projectedMonthlyExpense,
-        currency
-      ),
+      title:
+        "Projected Expense",
+      value:
+        formatCurrency(
+          projectedMonthlyExpense,
+          currency
+        ),
       description:
         currentMonthExpenses > 0
           ? "Estimated full-month expense based on your current daily average."
@@ -452,11 +931,13 @@ export default function DashboardPage() {
 
     insights.push({
       icon: "sparkles",
-      title: "Net Savings",
-      value: formatCurrency(
-        currentMonthSavings,
-        currency
-      ),
+      title:
+        "Net Savings",
+      value:
+        formatCurrency(
+          currentMonthSavings,
+          currency
+        ),
       description:
         currentMonthSavings >= 0
           ? "Your income is currently higher than your expenses this month."
@@ -479,7 +960,6 @@ export default function DashboardPage() {
       recentTransactions,
       insights,
 
-      // Monthly spending limit data
       spendingLimitPercentage,
       spendingLimitProgress,
       remainingSpendingLimit,
@@ -488,100 +968,219 @@ export default function DashboardPage() {
       spendingLimitApproaching,
       spendingLimitSafe,
     };
-  }, [transactions, currency, monthlyLimit]);
+  }, [
+    transactions,
+    currency,
+    monthlyLimit,
+  ]);
+
+  /*
+   * =========================================================
+   * BUDGET NOTIFICATION CHECK
+   * =========================================================
+   *
+   * Runs after dashboard data has loaded.
+   */
+  useEffect(() => {
+    if (loading) {
+      return;
+    }
+
+    if (monthlyLimit === null) {
+      return;
+    }
+
+    if (
+      dashboardData.currentMonthExpenses <=
+      0
+    ) {
+      return;
+    }
+
+    void checkBudgetNotification(
+      dashboardData.currentMonthExpenses,
+      monthlyLimit,
+      dashboardData.spendingLimitPercentage
+    );
+  }, [
+    loading,
+    monthlyLimit,
+    dashboardData.currentMonthExpenses,
+    dashboardData.spendingLimitPercentage,
+    currency,
+  ]);
+
+  /*
+   * =========================================================
+   * RECURRING PAYMENT NOTIFICATION CHECK
+   * =========================================================
+   *
+   * Checks active recurring expenses for:
+   *
+   * - 3 days before
+   * - 1 day before
+   * - Due today
+   */
+  useEffect(() => {
+    if (loading) {
+      return;
+    }
+
+    void checkRecurringPaymentNotifications(
+      currency
+    );
+  }, [
+    loading,
+    currency,
+  ]);
+
+  /*
+   * =========================================================
+   * STAT CARDS
+   * =========================================================
+   */
 
   const statCards = [
     {
-      title: "This Month Income",
-      value: dashboardData.currentMonthIncome,
+      title:
+        "This Month Income",
+      value:
+        dashboardData.currentMonthIncome,
       icon: Wallet,
       badge: "Income",
       badgeClass:
         "border-emerald-500/20 bg-emerald-500/10 text-emerald-400",
     },
     {
-      title: "This Month Spends",
-      value: dashboardData.currentMonthExpenses,
+      title:
+        "This Month Spends",
+      value:
+        dashboardData.currentMonthExpenses,
       icon: CreditCard,
       badge: "Live data",
       badgeClass:
         "border-red-500/20 bg-red-500/10 text-red-300",
     },
     {
-      title: "Net Savings",
-      value: dashboardData.currentMonthSavings,
+      title:
+        "Net Savings",
+      value:
+        dashboardData.currentMonthSavings,
       icon: TrendingUp,
       badge:
-        dashboardData.currentMonthSavings >= 0
+        dashboardData.currentMonthSavings >=
+          0
           ? "Saved"
           : "Overspent",
       badgeClass:
-        dashboardData.currentMonthSavings >= 0
+        dashboardData.currentMonthSavings >=
+          0
           ? "border-emerald-500/20 bg-emerald-500/10 text-emerald-400"
           : "border-red-500/20 bg-red-500/10 text-red-300",
     },
   ];
 
+  /*
+   * =========================================================
+   * SPENDX STATUS
+   * =========================================================
+   */
+
   const spendXStatusConfig = {
     loading: {
-      label: "Syncing SpendX",
+      label:
+        "Syncing SpendX",
       icon: Loader2,
       className:
         "border-cyan-500/20 bg-cyan-500/10 text-cyan-300",
-      iconClassName: "animate-spin text-cyan-400",
+      iconClassName:
+        "animate-spin text-cyan-400",
     },
+
     active: {
-      label: "SpendX Active",
+      label:
+        "SpendX Active",
       icon: CheckCircle2,
       className:
         "border-emerald-500/20 bg-emerald-500/10 text-emerald-300",
-      iconClassName: "text-emerald-400",
+      iconClassName:
+        "text-emerald-400",
     },
+
     offline: {
       label: "Offline",
       icon: WifiOff,
       className:
         "border-red-500/20 bg-red-500/10 text-red-300",
-      iconClassName: "text-red-400",
+      iconClassName:
+        "text-red-400",
     },
+
     session: {
-      label: "Session issue",
+      label:
+        "Session issue",
       icon: AlertTriangle,
       className:
         "border-amber-500/20 bg-amber-500/10 text-amber-300",
-      iconClassName: "text-amber-400",
+      iconClassName:
+        "text-amber-400",
     },
+
     database: {
-      label: "Database issue",
+      label:
+        "Database issue",
       icon: Database,
       className:
         "border-red-500/20 bg-red-500/10 text-red-300",
-      iconClassName: "text-red-400",
+      iconClassName:
+        "text-red-400",
     },
+
     empty: {
-      label: "No data yet",
+      label:
+        "No data yet",
       icon: Activity,
       className:
         "border-zinc-500/20 bg-white/[0.04] text-zinc-300",
-      iconClassName: "text-zinc-400",
+      iconClassName:
+        "text-zinc-400",
     },
   };
 
   const currentSpendXStatus =
-    spendXStatusConfig[dashboardStatus];
+    spendXStatusConfig[
+    dashboardStatus
+    ];
 
-  const SpendXStatusIcon = currentSpendXStatus.icon;
+  const SpendXStatusIcon =
+    currentSpendXStatus.icon;
 
   function renderInsightIcon(
-    icon: "brain" | "target" | "calendar" | "sparkles"
+    icon:
+      | "brain"
+      | "target"
+      | "calendar"
+      | "sparkles"
   ) {
-    if (icon === "brain") return <Brain size={19} />;
-    if (icon === "target") return <Target size={19} />;
-    if (icon === "calendar") {
-      return <CalendarDays size={19} />;
+    if (icon === "brain") {
+      return <Brain size={19} />;
     }
 
-    return <Sparkles size={19} />;
+    if (icon === "target") {
+      return <Target size={19} />;
+    }
+
+    if (icon === "calendar") {
+      return (
+        <CalendarDays
+          size={19}
+        />
+      );
+    }
+
+    return (
+      <Sparkles size={19} />
+    );
   }
 
   return (
@@ -625,54 +1224,69 @@ export default function DashboardPage() {
                   className="animate-spin text-muted-foreground"
                 />
 
-                <span>Loading your dashboard</span>
+                <span>
+                  Loading your dashboard
+                </span>
               </>
             ) : (
               <span>
-                Welcome back, {displayName}
+                Welcome back,{" "}
+                {displayName}
               </span>
             )}
           </div>
 
           <section className="grid grid-cols-1 gap-4 md:grid-cols-3 md:gap-6">
-            {statCards.map((card) => {
-              const Icon = card.icon;
+            {statCards.map(
+              (card) => {
+                const Icon =
+                  card.icon;
 
-              return (
-                <div
-                  key={card.title}
-                  className="sx-card rounded-2xl p-5 sm:p-7"
-                >
-                  <div className="mb-6 flex items-start justify-between gap-4 sm:mb-7">
-                    <div className="flex h-12 w-12 items-center justify-center rounded-xl border border-border bg-muted/70 text-muted-foreground">
-                      <Icon size={22} />
+                return (
+                  <div
+                    key={
+                      card.title
+                    }
+                    className="sx-card rounded-2xl p-5 sm:p-7"
+                  >
+                    <div className="mb-6 flex items-start justify-between gap-4 sm:mb-7">
+                      <div className="flex h-12 w-12 items-center justify-center rounded-xl border border-border bg-muted/70 text-muted-foreground">
+                        <Icon
+                          size={22}
+                        />
+                      </div>
+
+                      <span
+                        className={`rounded-full border px-3 py-1 text-xs font-semibold ${card.badgeClass}`}
+                      >
+                        {
+                          card.badge
+                        }
+                      </span>
                     </div>
 
-                    <span
-                      className={`rounded-full border px-3 py-1 text-xs font-semibold ${card.badgeClass}`}
-                    >
-                      {card.badge}
-                    </span>
+                    <p className="font-mono text-sm sx-muted">
+                      {
+                        card.title
+                      }
+                    </p>
+
+                    <h2 className="mt-2 break-words font-mono text-[2rem] font-bold leading-tight tracking-tight sx-title sm:text-4xl">
+                      {formatCurrency(
+                        card.value,
+                        currency
+                      )}
+                    </h2>
                   </div>
-
-                  <p className="font-mono text-sm sx-muted">
-                    {card.title}
-                  </p>
-
-                  <h2 className="mt-2 break-words font-mono text-[2rem] font-bold leading-tight tracking-tight sx-title sm:text-4xl">
-                    {formatCurrency(
-                      card.value,
-                      currency
-                    )}
-                  </h2>
-                </div>
-              );
-            })}
+                );
+              }
+            )}
           </section>
 
           {/* =====================================================
               MONTHLY SPENDING LIMIT
           ====================================================== */}
+
           <section className="sx-card mt-6 rounded-2xl p-5 sm:mt-8 sm:p-7">
             <div className="mb-6 flex flex-col justify-between gap-3 sm:flex-row sm:items-start">
               <div>
@@ -688,11 +1302,11 @@ export default function DashboardPage() {
               {monthlyLimit !== null && (
                 <span
                   className={`w-fit rounded-full border px-3 py-1 text-xs font-semibold ${dashboardData.spendingLimitExceeded ||
-                      dashboardData.spendingLimitCritical
-                      ? "border-red-500/20 bg-red-500/10 text-red-300"
-                      : dashboardData.spendingLimitApproaching
-                        ? "border-amber-500/20 bg-amber-500/10 text-amber-300"
-                        : "border-emerald-500/20 bg-emerald-500/10 text-emerald-400"
+                    dashboardData.spendingLimitCritical
+                    ? "border-red-500/20 bg-red-500/10 text-red-300"
+                    : dashboardData.spendingLimitApproaching
+                      ? "border-amber-500/20 bg-amber-500/10 text-amber-300"
+                      : "border-emerald-500/20 bg-emerald-500/10 text-emerald-400"
                     }`}
                 >
                   {dashboardData.spendingLimitExceeded
@@ -753,11 +1367,11 @@ export default function DashboardPage() {
                   <div className="mb-2 flex items-center justify-end text-sm">
                     <span
                       className={`font-mono font-semibold ${dashboardData.spendingLimitExceeded ||
-                          dashboardData.spendingLimitCritical
-                          ? "text-red-300"
-                          : dashboardData.spendingLimitApproaching
-                            ? "text-amber-300"
-                            : "text-emerald-400"
+                        dashboardData.spendingLimitCritical
+                        ? "text-red-300"
+                        : dashboardData.spendingLimitApproaching
+                          ? "text-amber-300"
+                          : "text-emerald-400"
                         }`}
                     >
                       {dashboardData.spendingLimitExceeded
@@ -780,11 +1394,11 @@ export default function DashboardPage() {
                   <div className="h-3 overflow-hidden rounded-full bg-muted">
                     <div
                       className={`h-3 rounded-full transition-all duration-700 ease-out ${dashboardData.spendingLimitExceeded ||
-                          dashboardData.spendingLimitCritical
-                          ? "bg-red-500"
-                          : dashboardData.spendingLimitApproaching
-                            ? "bg-amber-500"
-                            : "bg-emerald-500"
+                        dashboardData.spendingLimitCritical
+                        ? "bg-red-500"
+                        : dashboardData.spendingLimitApproaching
+                          ? "bg-amber-500"
+                          : "bg-emerald-500"
                         }`}
                       style={{
                         width: `${dashboardData.spendingLimitProgress}%`,
@@ -794,25 +1408,35 @@ export default function DashboardPage() {
 
                   {/* Threshold Labels */}
                   <div className="mt-2 flex justify-between text-[10px] sx-muted">
-                    <span>0%</span>
-                    <span>70%</span>
-                    <span>90%</span>
-                    <span>100%</span>
+                    <span>
+                      0%
+                    </span>
+
+                    <span>
+                      70%
+                    </span>
+
+                    <span>
+                      90%
+                    </span>
+
+                    <span>
+                      100%
+                    </span>
                   </div>
                 </div>
 
                 {/* Dynamic Status Message */}
                 <div
                   className={`rounded-xl border p-4 ${dashboardData.spendingLimitExceeded ||
-                      dashboardData.spendingLimitCritical
-                      ? "border-red-500/20 bg-red-500/10"
-                      : dashboardData.spendingLimitApproaching
-                        ? "border-amber-500/20 bg-amber-500/10"
-                        : "border-emerald-500/20 bg-emerald-500/10"
+                    dashboardData.spendingLimitCritical
+                    ? "border-red-500/20 bg-red-500/10"
+                    : dashboardData.spendingLimitApproaching
+                      ? "border-amber-500/20 bg-amber-500/10"
+                      : "border-emerald-500/20 bg-emerald-500/10"
                     }`}
                 >
                   <div className="flex items-start gap-3">
-                    {/* Dynamic Icon */}
                     {dashboardData.spendingLimitExceeded ||
                       dashboardData.spendingLimitCritical ? (
                       <AlertTriangle
@@ -832,14 +1456,13 @@ export default function DashboardPage() {
                     )}
 
                     <div>
-                      {/* Dynamic Message */}
                       <p
                         className={`font-semibold ${dashboardData.spendingLimitExceeded ||
-                            dashboardData.spendingLimitCritical
-                            ? "text-red-300"
-                            : dashboardData.spendingLimitApproaching
-                              ? "text-amber-300"
-                              : "text-emerald-400"
+                          dashboardData.spendingLimitCritical
+                          ? "text-red-300"
+                          : dashboardData.spendingLimitApproaching
+                            ? "text-amber-300"
+                            : "text-emerald-400"
                           }`}
                       >
                         {dashboardData.spendingLimitExceeded
@@ -886,6 +1509,7 @@ export default function DashboardPage() {
           </section>
 
           {/* SMART INSIGHTS */}
+
           <section className="sx-card mt-6 rounded-2xl p-5 sm:mt-8 sm:p-7">
             <div className="mb-6 flex flex-col justify-between gap-3 sm:flex-row sm:items-center">
               <div>
@@ -909,37 +1533,51 @@ export default function DashboardPage() {
                   size={18}
                   className="mr-2 animate-spin"
                 />
+
                 Building insights...
               </div>
             ) : (
               <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
-                {dashboardData.insights.map((insight) => (
-                  <div
-                    key={insight.title}
-                    className="sx-panel rounded-xl p-5"
-                  >
-                    <div className="mb-4 flex h-11 w-11 items-center justify-center rounded-2xl border border-emerald-500/20 bg-emerald-500/10 text-emerald-400">
-                      {renderInsightIcon(insight.icon)}
+                {dashboardData.insights.map(
+                  (insight) => (
+                    <div
+                      key={
+                        insight.title
+                      }
+                      className="sx-panel rounded-xl p-5"
+                    >
+                      <div className="mb-4 flex h-11 w-11 items-center justify-center rounded-2xl border border-emerald-500/20 bg-emerald-500/10 text-emerald-400">
+                        {renderInsightIcon(
+                          insight.icon
+                        )}
+                      </div>
+
+                      <p className="text-sm sx-muted">
+                        {
+                          insight.title
+                        }
+                      </p>
+
+                      <h4 className="mt-2 break-words font-mono text-2xl font-bold sx-title">
+                        {
+                          insight.value
+                        }
+                      </h4>
+
+                      <p className="mt-3 text-sm leading-6 sx-muted">
+                        {
+                          insight.description
+                        }
+                      </p>
                     </div>
-
-                    <p className="text-sm sx-muted">
-                      {insight.title}
-                    </p>
-
-                    <h4 className="mt-2 break-words font-mono text-2xl font-bold sx-title">
-                      {insight.value}
-                    </h4>
-
-                    <p className="mt-3 text-sm leading-6 sx-muted">
-                      {insight.description}
-                    </p>
-                  </div>
-                ))}
+                  )
+                )}
               </div>
             )}
           </section>
 
           {/* RECENT ACTIVITY + CASHFLOW */}
+
           <section className="mt-6 grid grid-cols-1 gap-6 sm:mt-8 lg:grid-cols-[1.5fr_1fr] lg:gap-8">
             <div className="sx-card rounded-2xl p-5 sm:p-7">
               <div className="mb-6 flex items-center justify-between">
@@ -948,7 +1586,10 @@ export default function DashboardPage() {
                 </h3>
 
                 <span className="text-sm sx-muted">
-                  {transactions.length} entries
+                  {
+                    transactions.length
+                  }{" "}
+                  entries
                 </span>
               </div>
 
@@ -958,6 +1599,7 @@ export default function DashboardPage() {
                     size={18}
                     className="mr-2 animate-spin"
                   />
+
                   Loading activity...
                 </div>
               ) : dashboardData.recentTransactions.length ===
@@ -971,28 +1613,37 @@ export default function DashboardPage() {
                   {dashboardData.recentTransactions.map(
                     (transaction) => {
                       const isIncome =
-                        transaction.type === "income";
+                        transaction.type ===
+                        "income";
 
-                      const amount = Number(
-                        transaction.amount || 0
-                      );
+                      const amount =
+                        Number(
+                          transaction.amount ||
+                          0
+                        );
 
                       return (
                         <div
-                          key={transaction.id}
+                          key={
+                            transaction.id
+                          }
                           className="sx-panel flex flex-col gap-4 rounded-xl p-4 sm:flex-row sm:items-center sm:justify-between"
                         >
                           <div className="flex items-center gap-4">
                             <div
                               className={`flex h-11 w-11 items-center justify-center rounded-2xl border ${isIncome
-                                  ? "border-emerald-500/20 bg-emerald-500/10 text-emerald-400"
-                                  : "border-red-500/20 bg-red-500/10 text-red-300"
+                                ? "border-emerald-500/20 bg-emerald-500/10 text-emerald-400"
+                                : "border-red-500/20 bg-red-500/10 text-red-300"
                                 }`}
                             >
                               {isIncome ? (
-                                <ArrowDownLeft size={19} />
+                                <ArrowDownLeft
+                                  size={19}
+                                />
                               ) : (
-                                <ArrowUpRight size={19} />
+                                <ArrowUpRight
+                                  size={19}
+                                />
                               )}
                             </div>
 
@@ -1018,11 +1669,13 @@ export default function DashboardPage() {
 
                           <p
                             className={`font-mono text-sm font-bold ${isIncome
-                                ? "text-emerald-400"
-                                : "text-red-300"
+                              ? "text-emerald-400"
+                              : "text-red-300"
                               }`}
                           >
-                            {isIncome ? "+" : "-"}
+                            {isIncome
+                              ? "+"
+                              : "-"}
                             {formatCurrency(
                               amount,
                               currency
@@ -1047,6 +1700,7 @@ export default function DashboardPage() {
 
               <div className="mt-7 space-y-5">
                 {/* Income */}
+
                 <div>
                   <div className="mb-2 flex items-center justify-between text-sm">
                     <span className="sx-muted">
@@ -1067,6 +1721,7 @@ export default function DashboardPage() {
                 </div>
 
                 {/* Expenses */}
+
                 <div>
                   <div className="mb-2 flex items-center justify-between text-sm">
                     <span className="sx-muted">
@@ -1104,15 +1759,17 @@ export default function DashboardPage() {
                 </div>
 
                 {/* Net Cashflow */}
+
                 <div className="sx-panel rounded-xl p-5">
                   <p className="text-sm sx-muted">
                     Net Cashflow
                   </p>
 
                   <p
-                    className={`mt-2 break-words font-mono text-3xl font-bold ${dashboardData.currentMonthSavings >= 0
-                        ? "text-emerald-400"
-                        : "text-red-300"
+                    className={`mt-2 break-words font-mono text-3xl font-bold ${dashboardData.currentMonthSavings >=
+                      0
+                      ? "text-emerald-400"
+                      : "text-red-300"
                       }`}
                   >
                     {formatCurrency(
@@ -1130,27 +1787,33 @@ export default function DashboardPage() {
                 </div>
 
                 {/* Highest Spending Category */}
+
                 <div className="sx-panel rounded-xl p-5">
                   <p className="text-sm sx-muted">
                     Highest Spending Category
                   </p>
 
                   <p className="mt-2 break-words font-mono text-2xl font-bold sx-title">
-                    {dashboardData.highestCategory}
+                    {
+                      dashboardData.highestCategory
+                    }
                   </p>
 
                   <p className="mt-3 text-sm sx-muted">
-                    {dashboardData.highestCategoryAmount >
-                      0
-                      ? `${formatCurrency(
-                        dashboardData.highestCategoryAmount,
-                        currency
-                      )} spent this month.`
-                      : "No expense category data available yet."}
+                    {
+                      dashboardData.highestCategoryAmount >
+                        0
+                        ? `${formatCurrency(
+                          dashboardData.highestCategoryAmount,
+                          currency
+                        )} spent this month.`
+                        : "No expense category data available yet."
+                    }
                   </p>
                 </div>
 
                 {/* Full Month Projection */}
+
                 <div className="sx-panel rounded-xl p-5">
                   <p className="text-sm sx-muted">
                     Full Month Expense Projection

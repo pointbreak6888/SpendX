@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
+import { Capacitor } from "@capacitor/core";
 import { supabase } from "@/lib/supabase";
 import { Loader2 } from "lucide-react";
 
@@ -100,7 +101,21 @@ export default function LoginPage() {
       setGoogleLoading(true);
       setErrorMessage("");
 
-      const redirectTo = `${window.location.origin}/auth/callback?next=/dashboard`;
+      /*
+       * Android / Capacitor:
+       * Use the native SpendX deep link.
+       *
+       * Web:
+       * Use the normal web callback.
+       */
+      const isNative = Capacitor.isNativePlatform();
+
+      const redirectTo = isNative
+        ? "com.spendx.app://auth/callback?next=/dashboard"
+        : `${window.location.origin}/auth/callback?next=/dashboard`;
+
+      console.log("Google OAuth platform:", isNative ? "native" : "web");
+      console.log("Google OAuth redirect:", redirectTo);
 
       const { error } = await supabase.auth.signInWithOAuth({
         provider: "google",
@@ -110,6 +125,7 @@ export default function LoginPage() {
       });
 
       if (error) {
+        console.error("Google OAuth error:", error);
         setErrorMessage(error.message);
         setGoogleLoading(false);
       }
@@ -139,7 +155,9 @@ export default function LoginPage() {
             X
           </div>
 
-          <h1 className="text-3xl font-bold tracking-tight">Welcome to SpendX</h1>
+          <h1 className="text-3xl font-bold tracking-tight">
+            Welcome to SpendX
+          </h1>
 
           <p className="mt-2 text-sm text-white/60">
             Sign in to manage your expenses smarter.
@@ -173,9 +191,11 @@ export default function LoginPage() {
 
         <div className="mb-5 flex items-center gap-3">
           <div className="h-px flex-1 bg-white/10" />
+
           <span className="text-xs uppercase tracking-wider text-white/40">
             or
           </span>
+
           <div className="h-px flex-1 bg-white/10" />
         </div>
 
