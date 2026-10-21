@@ -107,46 +107,57 @@ function ThemeSlider() {
   const isDark = theme === "dark";
 
   return (
-    <button
-      type="button"
-      aria-label="Switch light and dark theme"
-      aria-pressed={isDark}
-      onClick={() => setTheme(isDark ? "light" : "dark")}
-      className={`
-        relative h-14 w-28 shrink-0 overflow-hidden rounded-full border p-1
-        transition-all duration-300
-        ${isDark
-          ? "border-white/10 bg-zinc-950"
-          : "border-slate-300 bg-slate-200"
-        }
-      `}
+    <div
+      role="group"
+      aria-label="Appearance theme"
+      className="inline-flex h-12 w-28 shrink-0 items-center gap-1 rounded-full border border-border/80 bg-muted/70 p-1 shadow-inner"
     >
-      <span
+      {/* Light mode */}
+      <button
+        type="button"
+        aria-label="Switch to light mode"
+        aria-pressed={!isDark}
+        onClick={() => setTheme("light")}
         className={`
-          absolute top-1 h-12 w-12 rounded-full shadow-lg
-          transition-all duration-300 ease-out
-          ${isDark ? "left-[60px] bg-black" : "left-1 bg-white"}
+          flex h-full min-w-0 flex-1 items-center justify-center rounded-full
+          transition-all duration-300 ease-in-out
+          focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary
+          ${!isDark
+            ? "bg-white text-amber-500 shadow-sm ring-1 ring-black/5"
+            : "bg-transparent text-muted-foreground hover:bg-background/60 hover:text-foreground"
+          }
         `}
-      />
-
-      <span className="absolute left-1 top-1 z-10 flex h-12 w-12 items-center justify-center">
+      >
         <Sun
-          className={`
-            h-5 w-5 transition-colors duration-300
-            ${!isDark ? "text-orange-400" : "text-zinc-400"}
-          `}
+          size={19}
+          strokeWidth={2.2}
+          className="transition-transform duration-300 hover:rotate-45"
         />
-      </span>
+      </button>
 
-      <span className="absolute right-1 top-1 z-10 flex h-12 w-12 items-center justify-center">
+      {/* Dark mode */}
+      <button
+        type="button"
+        aria-label="Switch to dark mode"
+        aria-pressed={isDark}
+        onClick={() => setTheme("dark")}
+        className={`
+          flex h-full min-w-0 flex-1 items-center justify-center rounded-full
+          transition-all duration-300 ease-in-out
+          focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary
+          ${isDark
+            ? "bg-slate-800 text-cyan-400 shadow-sm ring-1 ring-white/10"
+            : "bg-transparent text-muted-foreground hover:bg-background/60 hover:text-foreground"
+          }
+        `}
+      >
         <Moon
-          className={`
-            h-5 w-5 transition-colors duration-300
-            ${isDark ? "text-cyan-400" : "text-slate-600"}
-          `}
+          size={19}
+          strokeWidth={2.2}
+          className="transition-transform duration-300 hover:-rotate-12"
         />
-      </span>
-    </button>
+      </button>
+    </div>
   );
 }
 
@@ -2029,15 +2040,15 @@ export default function Settings() {
                                   )
                                 }
                                 className={`flex w-full items-center justify-between border-b border-border/60 p-5 text-left transition-colors last:border-b-0 ${isExpanded
-                                    ? "bg-primary/10"
-                                    : "hover:bg-primary/5"
+                                  ? "bg-primary/10"
+                                  : "hover:bg-primary/5"
                                   }`}
                               >
                                 <div className="flex items-center gap-4">
                                   <div
                                     className={`rounded-2xl border p-3 transition-colors ${isExpanded
-                                        ? "border-indigo-500/30 bg-indigo-500/10 text-indigo-300"
-                                        : "border-border bg-muted/60 text-muted-foreground"
+                                      ? "border-indigo-500/30 bg-indigo-500/10 text-indigo-300"
+                                      : "border-border bg-muted/60 text-muted-foreground"
                                       }`}
                                   >
                                     <Icon
@@ -2067,8 +2078,8 @@ export default function Settings() {
                                     16
                                   }
                                   className={`transition-transform ${isExpanded
-                                      ? "rotate-180 text-primary"
-                                      : "text-muted-foreground"
+                                    ? "rotate-180 text-primary"
+                                    : "text-muted-foreground"
                                     }`}
                                 />
                               </button>
@@ -2199,8 +2210,8 @@ export default function Settings() {
 
                                             <span
                                               className={`rounded-full px-3 py-1 text-xs font-semibold ${paymentConnected
-                                                  ? "bg-emerald-500/10 text-emerald-300"
-                                                  : "bg-muted text-muted-foreground"
+                                                ? "bg-emerald-500/10 text-emerald-300"
+                                                : "bg-muted text-muted-foreground"
                                                 }`}
                                             >
                                               {paymentConnected
@@ -2656,12 +2667,12 @@ export default function Settings() {
 
                                                 <span
                                                   className={`rounded-full px-3 py-1 text-[10px] font-semibold ${biometricAvailable ===
-                                                      true
-                                                      ? "bg-emerald-500/10 text-emerald-300"
-                                                      : biometricAvailable ===
-                                                        false
-                                                        ? "bg-red-500/10 text-red-300"
-                                                        : "bg-muted text-muted-foreground"
+                                                    true
+                                                    ? "bg-emerald-500/10 text-emerald-300"
+                                                    : biometricAvailable ===
+                                                      false
+                                                      ? "bg-red-500/10 text-red-300"
+                                                      : "bg-muted text-muted-foreground"
                                                     }`}
                                                 >
                                                   {biometricAvailable ===
